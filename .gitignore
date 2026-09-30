@@ -1,0 +1,5 @@
+.spago/
+output/
+node_modules/
+.psc-ide-port
+.DS_Store

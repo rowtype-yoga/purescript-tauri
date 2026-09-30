@@ -1,0 +1,14 @@
+{
+  "name": "purescript-tauri",
+  "version": "0.0.1",
+  "description": "PureScript bindings for official Tauri 2 desktop APIs",
+  "license": "MIT",
+  "repository": "github:rowtype-yoga/purescript-tauri",
+  "private": true,
+  "type": "module",
+  "peerDependencies": {
+    "@tauri-apps/api": "^2.12.0",
+    "@tauri-apps/plugin-dialog": "^2.8.0",
+    "@tauri-apps/plugin-fs": "^2.6.0"
+  }
+}

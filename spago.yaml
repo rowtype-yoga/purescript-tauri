@@ -1,0 +1,27 @@
+package:
+  name: tauri
+  dependencies:
+    - aff: ">=8.0.0 <9.0.0"
+    - arrays: ">=7.3.0 <8.0.0"
+    - effect: ">=4.0.0 <5.0.0"
+    - either: ">=6.1.0 <7.0.0"
+    - exceptions: ">=6.1.0 <7.0.0"
+    - foldable-traversable: ">=6.0.0 <7.0.0"
+    - js-promise: ">=1.0.0 <2.0.0"
+    - js-promise-aff: ">=1.0.0 <2.0.0"
+    - maybe: ">=6.0.0 <7.0.0"
+    - nullable: ">=6.0.0 <7.0.0"
+    - prelude: ">=6.0.2 <7.0.0"
+    - refs: ">=6.0.0 <7.0.0"
+  publish:
+    version: 0.0.1
+    license: MIT
+    include:
+      - package.json
+      - LICENSE
+    location:
+      githubOwner: rowtype-yoga
+      githubRepo: purescript-tauri
+workspace:
+  packageSet:
+    registry: 77.3.1
