@@ -1,0 +1,27 @@
+[package]
+name = "tauri-plugin-local-control"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.77.2"
+links = "tauri-plugin-local-control"
+license = "MIT"
+description = "Authenticated loopback HTTP transport for Tauri frontend request handlers"
+repository = "https://github.com/rowtype-yoga/purescript-tauri"
+
+[build-dependencies]
+tauri-plugin = { version = "2.7", features = ["build"] }
+
+[dependencies]
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
+getrandom = "0.3"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2.6"
+tauri = { version = "2.12", default-features = false }
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
