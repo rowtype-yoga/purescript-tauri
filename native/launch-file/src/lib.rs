@@ -2,7 +2,11 @@
 //! Register alongside tauri-plugin-fs; the frontend still needs the relevant fs
 //! command permissions. Argument interpretation belongs to the application.
 
-use std::{env, fs, io, path::PathBuf};
+use std::{
+    env, fs,
+    io::{self, Read},
+    path::PathBuf,
+};
 use tauri::{
     plugin::{Builder, TauriPlugin},
     AppHandle, Manager, Runtime, State,
@@ -39,6 +43,19 @@ fn arguments(launch: State<'_, Launch>) -> Vec<String> {
 }
 
 #[tauri::command]
+async fn read_stdin() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut source = String::new();
+        io::stdin()
+            .read_to_string(&mut source)
+            .map_err(|error| format!("Cannot read standard input: {error}"))?;
+        Ok(source)
+    })
+    .await
+    .map_err(|error| format!("Standard input worker failed: {error}"))?
+}
+
+#[tauri::command]
 fn authorize_file_argument<R: Runtime>(
     app: AppHandle<R>,
     launch: State<'_, Launch>,
@@ -61,7 +78,11 @@ fn authorize_file_argument<R: Runtime>(
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("launch-file")
-        .invoke_handler(tauri::generate_handler![arguments, authorize_file_argument])
+        .invoke_handler(tauri::generate_handler![
+            arguments,
+            authorize_file_argument,
+            read_stdin
+        ])
         .setup(|app, _| {
             let cwd = env::current_dir()?;
             let arguments = env::args_os()

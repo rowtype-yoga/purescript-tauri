@@ -1,0 +1,23 @@
+[package]
+name = "tauri-native-host"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "Embedded PureScript JavaScript host with native graphics and terminal primitives"
+
+[dependencies]
+rquickjs = "0.9.0"
+# Keep upstream's default feature set for its CPU prebuilt binaries. No SVG,
+# textlayout or GPU feature is enabled; text is shaped by Rustybuzz below.
+skia-safe = "=0.153.3"
+fontdb = "0.23.0"
+rustybuzz = "0.20.1"
+svgtypes = "0.15.3"
+unicode-segmentation = "1.12"
+unicode-script = "0.5"
+crossterm = "0.28.1"
+ctrlc = { version = "3.4", features = ["termination"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+

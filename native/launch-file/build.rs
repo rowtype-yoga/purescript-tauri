@@ -1,3 +1,3 @@
 fn main() {
-    tauri_plugin::Builder::new(&["arguments", "authorize_file_argument"]).build();
+    tauri_plugin::Builder::new(&["arguments", "authorize_file_argument", "read_stdin"]).build();
 }

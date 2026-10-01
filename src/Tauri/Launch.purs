@@ -1,8 +1,9 @@
--- | Process startup arguments and file access explicitly authorized by them.
+-- | Process startup arguments, standard input, and explicitly authorized files.
 -- | Register tauri-plugin-launch-file alongside tauri-plugin-fs and grant
--- | launch-file:allow-arguments and launch-file:allow-authorize-file-argument
--- | only to the application webview that handles launch arguments.
-module Tauri.Launch (arguments, authorizeFileArgument) where
+-- | launch-file:allow-arguments, launch-file:allow-authorize-file-argument,
+-- | and launch-file:allow-read-stdin only to the application webview that
+-- | handles launch input.
+module Tauri.Launch (arguments, authorizeFileArgument, readStdin) where
 
 import Effect (Effect)
 import Effect.Aff (Aff)
@@ -20,5 +21,11 @@ arguments = toAffE argumentsImpl
 authorizeFileArgument :: String -> Aff String
 authorizeFileArgument path = toAffE (authorizeFileArgumentImpl path)
 
+-- | Read UTF-8 standard input to EOF on a native blocking worker.
+-- | I/O and invalid UTF-8 errors reject the Aff.
+readStdin :: Aff String
+readStdin = toAffE readStdinImpl
+
 foreign import argumentsImpl :: Effect (Promise (Array String))
 foreign import authorizeFileArgumentImpl :: String -> Effect (Promise String)
+foreign import readStdinImpl :: Effect (Promise String)
