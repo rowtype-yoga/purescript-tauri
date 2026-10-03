@@ -4,9 +4,16 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+#[cfg(target_os = "macos")]
+use objc2::{rc::Retained, runtime::ProtocolObject};
+#[cfg(target_os = "macos")]
+use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
+
 use fontdb::{Database, Family, Query, Source, Stretch, Style, Weight, ID};
 use rustybuzz::{Face, Feature, UnicodeBuffer};
 use skia_safe::canvas::SaveLayerRec;
+#[cfg(target_os = "macos")]
+use skia_safe::gpu::{self, DirectContext};
 use skia_safe::{
     color_filters, image_filters, paint, surfaces, AlphaType, BlendMode, Canvas, ClipOp, ColorType,
     Data, FilterMode, Font, FontHinting, FontMgr, ImageInfo, Matrix, Paint, PaintStyle, Path,
@@ -48,10 +55,73 @@ struct DrawStyle {
     tint: Option<skia_safe::ColorFilter>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SurfaceBackend {
+    Cpu,
+    #[cfg(target_os = "macos")]
+    Metal,
+}
+
 struct Raster {
     surface: Surface,
+    backend: SurfaceBackend,
     style: DrawStyle,
     saved: Vec<DrawStyle>,
+}
+
+#[cfg(target_os = "macos")]
+struct MetalBackend {
+    // Fields are dropped in declaration order. Graphics drops its surfaces before
+    // this backend, then Ganesh releases the queue and device before our retains.
+    context: DirectContext,
+    _queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    _device: Retained<ProtocolObject<dyn MTLDevice>>,
+}
+
+#[cfg(target_os = "macos")]
+impl MetalBackend {
+    fn new() -> HostResult<Self> {
+        let device = MTLCreateSystemDefaultDevice()
+            .ok_or_else(|| failure("could not create the default Metal device"))?;
+        let queue = device
+            .newCommandQueue()
+            .ok_or_else(|| failure("could not create the Metal command queue"))?;
+        // BackendContext retains its inputs while it exists; DirectContext takes
+        // another retain, so the temporary backend can drop immediately.
+        let backend = unsafe {
+            gpu::mtl::BackendContext::new(
+                Retained::as_ptr(&device) as gpu::mtl::Handle,
+                Retained::as_ptr(&queue) as gpu::mtl::Handle,
+            )
+        };
+        let mut context = gpu::direct_contexts::make_metal(&backend, None)
+            .ok_or_else(|| failure("could not initialize Skia Ganesh with Metal"))?;
+        if context.is_device_lost() || context.oomed() {
+            return Err(failure("Skia Ganesh Metal context is unavailable"));
+        }
+        Ok(Self {
+            context,
+            _queue: queue,
+            _device: device,
+        })
+    }
+
+    fn encode(
+        &mut self,
+        image: &skia_safe::Image,
+        options: &skia_safe::png_encoder::Options,
+    ) -> HostResult<Data> {
+        // PNG is a non-local compatibility path. Complete Ganesh work before
+        // its encoder reads the snapshot back from the Metal texture.
+        self.context.flush_submit_and_sync_cpu();
+        if self.context.is_device_lost() || self.context.oomed() {
+            return Err(failure(
+                "Metal canvas became unavailable during PNG encoding",
+            ));
+        }
+        skia_safe::png_encoder::encode_image(&mut self.context, image, options)
+            .ok_or_else(|| failure("could not encode Metal canvas PNG"))
+    }
 }
 
 struct RequestedFont {
@@ -75,7 +145,13 @@ pub(crate) struct Graphics {
     features: HashMap<ID, Vec<Feature>>,
     font_manager: FontMgr,
     typefaces: HashMap<ID, Typeface>,
+    // This must precede MetalBackend: every Ganesh surface is dropped before its
+    // DirectContext, command queue, and device.
     surfaces: HashMap<u32, Raster>,
+    #[cfg(target_os = "macos")]
+    metal: Option<MetalBackend>,
+    #[cfg(target_os = "macos")]
+    terminal_graphics_active: bool,
     next_surface: u32,
 }
 
@@ -130,6 +206,10 @@ impl Graphics {
             font_manager: FontMgr::new(),
             typefaces: HashMap::new(),
             surfaces: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            metal: None,
+            #[cfg(target_os = "macos")]
+            terminal_graphics_active: false,
             next_surface: 1,
         })
     }
@@ -376,26 +456,97 @@ impl Graphics {
             .ok_or_else(|| failure(format!("unknown canvas surface: {id}")))
     }
 
+    pub fn begin_terminal_graphics(&mut self) -> HostResult<()> {
+        #[cfg(target_os = "macos")]
+        {
+            if self.metal.is_none() {
+                self.metal = Some(MetalBackend::new()?);
+            }
+            self.terminal_graphics_active = true;
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(failure(
+                "GPU terminal graphics are unsupported on this platform",
+            ))
+        }
+    }
+
+    pub fn end_terminal_graphics(&mut self) {
+        // Do not drop Metal here: existing Ganesh surfaces retain GPU resources
+        // and must outlive the DirectContext. This changes only future creates.
+        #[cfg(target_os = "macos")]
+        {
+            self.terminal_graphics_active = false;
+        }
+    }
+
     pub fn create(&mut self, width: i32, height: i32) -> HostResult<u32> {
         rgba_size(width, height)?;
         let id = self.next_surface;
         let next = id
             .checked_add(1)
             .ok_or_else(|| failure("canvas handles exhausted"))?;
-        let mut surface = surfaces::raster_n32_premul((width, height))
-            .ok_or_else(|| failure(format!("could not allocate {width}x{height} canvas")))?;
+        #[cfg(target_os = "macos")]
+        let (mut surface, backend) = if self.terminal_graphics_active {
+            let info = ImageInfo::new(
+                (width, height),
+                ColorType::RGBA8888,
+                AlphaType::Premul,
+                None,
+            );
+            let metal = self
+                .metal
+                .as_mut()
+                .ok_or_else(|| failure("Metal terminal graphics backend is not initialized"))?;
+            let surface = gpu::surfaces::render_target(
+                &mut metal.context,
+                gpu::Budgeted::Yes,
+                &info,
+                0usize,
+                gpu::SurfaceOrigin::TopLeft,
+                None,
+                false,
+                false,
+            )
+            .ok_or_else(|| failure(format!("could not allocate {width}x{height} Metal canvas")))?;
+            (surface, SurfaceBackend::Metal)
+        } else {
+            (
+                surfaces::raster_n32_premul((width, height)).ok_or_else(|| {
+                    failure(format!("could not allocate {width}x{height} canvas"))
+                })?,
+                SurfaceBackend::Cpu,
+            )
+        };
+        #[cfg(not(target_os = "macos"))]
+        let (mut surface, backend) = (
+            surfaces::raster_n32_premul((width, height))
+                .ok_or_else(|| failure(format!("could not allocate {width}x{height} canvas")))?,
+            SurfaceBackend::Cpu,
+        );
         // Preserve an untouched root clip so reset can discard every user clip.
         surface.canvas().save();
         self.surfaces.insert(
             id,
             Raster {
                 surface,
+                backend,
                 style: DrawStyle::default(),
                 saved: Vec::new(),
             },
         );
         self.next_surface = next;
         Ok(id)
+    }
+
+    pub fn dimensions(&self, id: u32) -> HostResult<(i32, i32)> {
+        let raster = self
+            .surfaces
+            .get(&id)
+            .ok_or_else(|| failure(format!("unknown canvas surface: {id}")))?;
+        Ok((raster.surface.width(), raster.surface.height()))
     }
 
     pub fn release(&mut self, id: u32) -> HostResult<()> {
@@ -658,34 +809,76 @@ impl Graphics {
     }
 
     pub fn png(&mut self, id: u32, path: &str) -> HostResult<()> {
-        let pixels = self
-            .raster(id)?
-            .surface
-            .peek_pixels()
-            .ok_or_else(|| failure("canvas raster pixels are unavailable"))?;
-        let mut file = std::fs::File::create(path)?;
-        if !skia_safe::png_encoder::encode(&pixels, &mut file, &Default::default()) {
-            return Err(failure(format!("could not encode canvas PNG: {path}")));
+        let backend = self
+            .surfaces
+            .get(&id)
+            .ok_or_else(|| failure(format!("unknown canvas surface: {id}")))?
+            .backend;
+        match backend {
+            SurfaceBackend::Cpu => {
+                let pixels = self
+                    .raster(id)?
+                    .surface
+                    .peek_pixels()
+                    .ok_or_else(|| failure("canvas raster pixels are unavailable"))?;
+                let mut file = std::fs::File::create(path)?;
+                if !skia_safe::png_encoder::encode(&pixels, &mut file, &Default::default()) {
+                    return Err(failure(format!("could not encode canvas PNG: {path}")));
+                }
+                Ok(())
+            }
+            #[cfg(target_os = "macos")]
+            SurfaceBackend::Metal => {
+                let image = self.raster(id)?.surface.image_snapshot();
+                let data = self
+                    .metal
+                    .as_mut()
+                    .ok_or_else(|| failure("Metal canvas lost its Ganesh context"))?
+                    .encode(&image, &Default::default())?;
+                let mut file = std::fs::File::create(path)?;
+                std::io::Write::write_all(&mut file, data.as_bytes())?;
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     pub fn encode_png(&mut self, id: u32, output: &mut Vec<u8>) -> HostResult<()> {
-        let pixels = self
-            .raster(id)?
-            .surface
-            .peek_pixels()
-            .ok_or_else(|| failure("canvas raster pixels are unavailable"))?;
-        output.clear();
+        let backend = self
+            .surfaces
+            .get(&id)
+            .ok_or_else(|| failure(format!("unknown canvas surface: {id}")))?
+            .backend;
         // Streaming frames favor encode latency over the smallest file. PNG
         // remains lossless; avoid testing every filter and level-6 compression.
         let mut options = skia_safe::png_encoder::Options::default();
         options.filter_flags = skia_safe::png_encoder::FilterFlag::NONE;
         options.z_lib_level = 1;
-        if !skia_safe::png_encoder::encode(&pixels, output, &options) {
-            return Err(failure("could not encode canvas PNG"));
+        match backend {
+            SurfaceBackend::Cpu => {
+                let pixels = self
+                    .raster(id)?
+                    .surface
+                    .peek_pixels()
+                    .ok_or_else(|| failure("canvas raster pixels are unavailable"))?;
+                output.clear();
+                if !skia_safe::png_encoder::encode(&pixels, output, &options) {
+                    return Err(failure("could not encode canvas PNG"));
+                }
+                Ok(())
+            }
+            #[cfg(target_os = "macos")]
+            SurfaceBackend::Metal => {
+                let image = self.raster(id)?.surface.image_snapshot();
+                let data = self
+                    .metal
+                    .as_mut()
+                    .ok_or_else(|| failure("Metal canvas lost its Ganesh context"))?
+                    .encode(&image, &options)?;
+                output.clear();
+                output.extend_from_slice(data.as_bytes());
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     pub fn read_rgba(
@@ -696,12 +889,20 @@ impl Graphics {
         output: &mut [u8],
     ) -> HostResult<()> {
         let size = rgba_size(width, height)?;
-        let raster = self.raster(id)?;
-        if raster.surface.width() != width || raster.surface.height() != height {
-            return Err(failure(format!(
-                "canvas is {}x{}, expected {width}x{height}",
+        let (actual_width, actual_height, _backend) = {
+            let raster = self
+                .surfaces
+                .get(&id)
+                .ok_or_else(|| failure(format!("unknown canvas surface: {id}")))?;
+            (
                 raster.surface.width(),
                 raster.surface.height(),
+                raster.backend,
+            )
+        };
+        if actual_width != width || actual_height != height {
+            return Err(failure(format!(
+                "canvas is {actual_width}x{actual_height}, expected {width}x{height}",
             )));
         }
         if output.len() != size {
@@ -710,19 +911,90 @@ impl Graphics {
                 output.len()
             )));
         }
+        #[cfg(target_os = "macos")]
+        if _backend == SurfaceBackend::Metal {
+            // Submit this render target. Synchronous read_pixels below waits for
+            // its readback; a CPU wait here would introduce a second GPU stall.
+            let (surfaces, metal) = (&mut self.surfaces, &mut self.metal);
+            let raster = surfaces
+                .get_mut(&id)
+                .ok_or_else(|| failure(format!("unknown canvas surface: {id}")))?;
+            let metal = metal
+                .as_mut()
+                .ok_or_else(|| failure("Metal canvas lost its Ganesh context"))?;
+            metal
+                .context
+                .flush_and_submit_surface(&mut raster.surface, gpu::SyncCpu::No);
+            if metal.context.is_device_lost() || metal.context.oomed() {
+                return Err(failure("Metal canvas became unavailable during readback"));
+            }
+        }
         let info = ImageInfo::new(
             (width, height),
             ColorType::RGBA8888,
             AlphaType::Unpremul,
             None,
         );
-        if !raster
+        if !self
+            .surfaces
+            .get_mut(&id)
+            .expect("canvas was validated above")
             .surface
             .read_pixels(&info, output, width as usize * 4, (0, 0))
         {
             return Err(failure("could not read straight RGBA canvas pixels"));
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod metal_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_canvases_are_metal_backed_and_read_straight_rgba() {
+        let mut graphics = Graphics::new(&[]).expect("system fonts are available");
+        graphics
+            .begin_terminal_graphics()
+            .expect("Metal Ganesh initializes");
+        let gpu = graphics.create(1, 1).expect("Metal surface allocates");
+        assert!(
+            graphics
+                .raster(gpu)
+                .expect("surface exists")
+                .surface
+                .image_snapshot()
+                .is_texture_backed(),
+            "terminal surface must be a Ganesh texture, not a CPU raster"
+        );
+
+        graphics
+            .clear(gpu, [37, 73, 109, 127])
+            .expect("Metal canvas clears");
+        let mut rgba = [0; 4];
+        graphics
+            .read_rgba(gpu, 1, 1, &mut rgba)
+            .expect("GPU readback succeeds");
+        assert_eq!(rgba[3], 127, "readback preserves straight alpha");
+        for (actual, expected) in rgba[..3].iter().zip([37, 73, 109]) {
+            assert!(
+                actual.abs_diff(expected) <= 1,
+                "straight RGB changed from {expected} to {actual}"
+            );
+        }
+
+        graphics.end_terminal_graphics();
+        let cpu = graphics.create(1, 1).expect("CPU surface allocates");
+        assert!(
+            !graphics
+                .raster(cpu)
+                .expect("surface exists")
+                .surface
+                .image_snapshot()
+                .is_texture_backed(),
+            "ending terminal graphics returns subsequent exports to CPU"
+        );
     }
 }
 

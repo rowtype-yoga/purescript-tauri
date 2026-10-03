@@ -1,4 +1,6 @@
--- | Reusable display-independent CPU Skia canvases. Requires tauri-native-host.
+-- | Reusable Skia canvases. Requires tauri-native-host.
+-- | Normally CPU-backed; canvases created during a macOS terminal graphics
+-- | session use Metal instead.
 -- | Surface handles must be released when their owner is finished drawing.
 module Tauri.Native.Canvas
   ( Surface

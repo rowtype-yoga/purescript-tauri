@@ -12,10 +12,14 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled
 use crate::graphics::Graphics;
 use crate::{failure, HostResult};
 
+#[cfg(unix)]
+use crate::terminal_shm::SharedFrame;
+
 const GRAPHICS_IMAGE_A: u32 = 2_147_483_647;
 const GRAPHICS_IMAGE_B: u32 = 2_147_483_646;
 const GRAPHICS_PLACEMENT_ID: u32 = 2_147_483_645;
 const GRAPHICS_QUERY_ID: u32 = 2_147_483_644;
+const GRAPHICS_SHM_QUERY_ID: u32 = 2_147_483_643;
 const QUERY_WAIT: Duration = Duration::from_millis(300);
 const RAW_CHUNK: usize = 3 * 1024;
 
@@ -29,6 +33,12 @@ pub(crate) struct Terminal {
     pipe: Option<PipeInput>,
     graphics_active: bool,
     displayed_image: Option<u32>,
+    #[cfg(unix)]
+    displayed_number: Option<u32>,
+    #[cfg(unix)]
+    graphics_medium: Option<GraphicsMedium>,
+    #[cfg(unix)]
+    pending_frames: VecDeque<PendingFrame>,
     png: Vec<u8>,
     encoded: Vec<u8>,
 }
@@ -45,6 +55,19 @@ enum Control {
 enum Input {
     Control(Control),
     Key(String),
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphicsMedium {
+    Direct,
+    SharedMemory,
+}
+
+#[cfg(unix)]
+struct PendingFrame {
+    number: u32,
+    _frame: SharedFrame,
 }
 
 impl Terminal {
@@ -130,7 +153,7 @@ impl Terminal {
         }
         #[cfg(unix)]
         if self.graphics_active {
-            self.graphics_error()?;
+            self.settle_pending_frame(false)?;
         }
         #[cfg(unix)]
         if let Some(input) = &mut self.input {
@@ -207,12 +230,14 @@ impl Terminal {
                     }
                 }
             }
-            let probed = self.probe_graphics();
-            if let Err(error) = probed {
-                if entered_here {
-                    let _ = self.restore();
+            match self.probe_graphics() {
+                Ok(medium) => self.graphics_medium = Some(medium),
+                Err(error) => {
+                    if entered_here {
+                        let _ = self.restore();
+                    }
+                    return Err(error);
                 }
-                return Err(error);
             }
             // Mark this before emitting control bytes so every partial
             // alternate-screen acquisition is unwound by the same path.
@@ -276,83 +301,199 @@ impl Terminal {
                     "terminal graphics positions are 1-based and must be positive",
                 ));
             }
-            self.graphics_error()?;
-            graphics.encode_png(surface, &mut self.png)?;
-            if self.png.is_empty() {
-                return Err(failure("canvas PNG encoding produced no bytes"));
-            }
-            let image = match self.displayed_image {
-                Some(GRAPHICS_IMAGE_A) => GRAPHICS_IMAGE_B,
-                _ => GRAPHICS_IMAGE_A,
-            };
-            let previous = self.displayed_image;
-            let mut output = io::stdout().lock();
-            output.write_all(b"\x1b7")?;
-            write!(output, "\x1b[{row};{column}H")?;
-            let transfer = (|| -> HostResult<()> {
-                let chunk_count = self
-                    .png
-                    .len()
-                    .checked_add(RAW_CHUNK - 1)
-                    .ok_or_else(|| failure("canvas PNG is too large for terminal transfer"))?
-                    / RAW_CHUNK;
-                for index in 0..chunk_count {
-                    let start = index * RAW_CHUNK;
-                    let end = (start + RAW_CHUNK).min(self.png.len());
-                    let chunk = &self.png[start..end];
-                    let encoded_length = base64_length(chunk.len())?;
-                    if self.encoded.len() < encoded_length {
-                        self.encoded.resize(encoded_length, 0);
-                    }
-                    STANDARD
-                        .encode_slice(chunk, &mut self.encoded[..encoded_length])
-                        .map_err(|error| {
-                            failure(format!("could not base64 encode PNG: {error}"))
-                        })?;
-                    let more = if index + 1 == chunk_count { 0 } else { 1 };
-                    if index == 0 {
-                        write!(
-                            output,
-                            "\x1b_Ga=T,f=100,t=d,i={image},p={GRAPHICS_PLACEMENT_ID},q=1,C=1,m={more};"
-                        )?;
-                    } else {
-                        write!(output, "\x1b_Gq=1,m={more};")?;
-                    }
-                    output.write_all(&self.encoded[..encoded_length])?;
-                    output.write_all(b"\x1b\\")?;
+            match self
+                .graphics_medium
+                .ok_or_else(|| failure("terminal graphics transport was not negotiated"))?
+            {
+                GraphicsMedium::Direct => self.present_direct(graphics, surface, column, row),
+                GraphicsMedium::SharedMemory => {
+                    self.present_shared_memory(graphics, surface, column, row)
                 }
-                if let Some(previous) = previous {
-                    write!(
-                        output,
-                        "\x1b_Ga=d,d=I,i={previous},p={GRAPHICS_PLACEMENT_ID},q=2;\x1b\\"
-                    )?;
-                }
-                Ok(())
-            })();
-            let restored = output.write_all(b"\x1b8").and_then(|_| output.flush());
-            if let Err(error) = transfer {
-                let _ = restored;
-                return Err(error);
             }
-            restored?;
-            self.displayed_image = Some(image);
-            Ok(())
         }
     }
 
     #[cfg(unix)]
-    fn graphics_error(&mut self) -> HostResult<()> {
-        let input = self
-            .input
-            .as_mut()
-            .ok_or_else(|| failure("controlling terminal input is unavailable"))?;
-        input.drain(false)?;
-        if let Some(message) = input.take_session_error() {
-            return Err(failure(format!(
-                "terminal rejected graphics transfer: {message}"
-            )));
+    fn present_direct(
+        &mut self,
+        graphics: &mut Graphics,
+        surface: u32,
+        column: i32,
+        row: i32,
+    ) -> HostResult<()> {
+        graphics.encode_png(surface, &mut self.png)?;
+        if self.png.is_empty() {
+            return Err(failure("canvas PNG encoding produced no bytes"));
         }
+        let number = self.next_image_number();
+        let previous = self.displayed_image;
+        let mut output = io::stdout().lock();
+        output.write_all(b"\x1b7")?;
+        write!(output, "\x1b[{row};{column}H")?;
+        let transfer = (|| -> HostResult<()> {
+            let chunk_count = self
+                .png
+                .len()
+                .checked_add(RAW_CHUNK - 1)
+                .ok_or_else(|| failure("canvas PNG is too large for terminal transfer"))?
+                / RAW_CHUNK;
+            for index in 0..chunk_count {
+                let start = index * RAW_CHUNK;
+                let end = (start + RAW_CHUNK).min(self.png.len());
+                let chunk = &self.png[start..end];
+                let encoded_length = base64_length(chunk.len())?;
+                if self.encoded.len() < encoded_length {
+                    self.encoded.resize(encoded_length, 0);
+                }
+                STANDARD
+                    .encode_slice(chunk, &mut self.encoded[..encoded_length])
+                    .map_err(|error| failure(format!("could not base64 encode PNG: {error}")))?;
+                let more = if index + 1 == chunk_count { 0 } else { 1 };
+                if index == 0 {
+                    write!(
+                        output,
+                        "\x1b_Ga=T,f=100,t=d,I={number},p={GRAPHICS_PLACEMENT_ID},C=1,m={more};"
+                    )?;
+                } else {
+                    write!(output, "\x1b_Gm={more};")?;
+                }
+                output.write_all(&self.encoded[..encoded_length])?;
+                output.write_all(b"\x1b\\")?;
+            }
+            if let Some(previous) = previous {
+                write!(
+                    output,
+                    "\x1b_Ga=d,d=I,i={previous},p={GRAPHICS_PLACEMENT_ID},q=2;\x1b\\"
+                )?;
+            }
+            Ok(())
+        })();
+        let restored = output.write_all(b"\x1b8").and_then(|_| output.flush());
+        if let Err(error) = transfer {
+            let _ = restored;
+            return Err(error);
+        }
+        restored?;
+        let image = self.wait_for_image_number_reply(number)?;
+        self.displayed_image = Some(image);
+        self.displayed_number = Some(number);
         Ok(())
+    }
+
+    #[cfg(unix)]
+    fn present_shared_memory(
+        &mut self,
+        graphics: &mut Graphics,
+        surface: u32,
+        column: i32,
+        row: i32,
+    ) -> HostResult<()> {
+        self.settle_pending_frame(true)?;
+        let (width, height) = graphics.dimensions(surface)?;
+        let byte_length = rgba_byte_length(width, height)?;
+        let mut frame = SharedFrame::create(byte_length).map_err(|error| {
+            failure(format!(
+                "could not create Kitty shared-memory frame: {error}"
+            ))
+        })?;
+        graphics.read_rgba(surface, width, height, frame.bytes_mut())?;
+
+        let number = self.next_image_number();
+        let previous = self.displayed_image;
+        let name_length = base64_length(frame.name().len())?;
+        if self.encoded.len() < name_length {
+            self.encoded.resize(name_length, 0);
+        }
+        STANDARD
+            .encode_slice(frame.name(), &mut self.encoded[..name_length])
+            .map_err(|error| {
+                failure(format!(
+                    "could not base64 encode shared-memory name: {error}"
+                ))
+            })?;
+
+        let mut output = io::stdout().lock();
+        output.write_all(b"\x1b7")?;
+        write!(output, "\x1b[{row};{column}H")?;
+        let transfer = (|| -> HostResult<()> {
+            write!(
+                output,
+                "\x1b_Ga=T,f=32,t=s,s={width},v={height},S={byte_length},I={number},p={GRAPHICS_PLACEMENT_ID},C=1;"
+            )?;
+            output.write_all(&self.encoded[..name_length])?;
+            output.write_all(b"\x1b\\")?;
+            if let Some(previous) = previous {
+                write!(
+                    output,
+                    "\x1b_Ga=d,d=I,i={previous},p={GRAPHICS_PLACEMENT_ID},q=2;\x1b\\"
+                )?;
+            }
+            Ok(())
+        })();
+        if transfer.is_ok() {
+            // Keep the mapping live until the terminal reports that it has
+            // consumed the named object. One outstanding frame gives bounded
+            // memory and prevents reusing either image number prematurely.
+            self.pending_frames.push_back(PendingFrame {
+                number,
+                _frame: frame,
+            });
+        }
+        let restored = output.write_all(b"\x1b8").and_then(|_| output.flush());
+        if let Err(error) = transfer {
+            let _ = restored;
+            return Err(error);
+        }
+        restored?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn next_image_number(&self) -> u32 {
+        match self.displayed_number {
+            Some(GRAPHICS_IMAGE_A) => GRAPHICS_IMAGE_B,
+            _ => GRAPHICS_IMAGE_A,
+        }
+    }
+
+    #[cfg(unix)]
+    fn settle_pending_frame(&mut self, wait: bool) -> HostResult<()> {
+        let deadline = Instant::now() + QUERY_WAIT;
+        loop {
+            let number = match self.pending_frames.front() {
+                Some(frame) => frame.number,
+                None => return Ok(()),
+            };
+            let input = self
+                .input
+                .as_mut()
+                .ok_or_else(|| failure("controlling terminal input is unavailable"))?;
+            input.drain(false)?;
+            if let Some(reply) = input.take_kitty_reply_for_number(number) {
+                // Removing the frame drops its mapping only after the terminal
+                // has acknowledged reading its POSIX shared-memory object.
+                self.pending_frames.pop_front();
+                return match reply {
+                    Ok(image) => {
+                        self.displayed_image = Some(image);
+                        self.displayed_number = Some(number);
+                        Ok(())
+                    }
+                    Err(message) => Err(failure(format!(
+                        "terminal rejected shared-memory graphics transfer: {message}"
+                    ))),
+                };
+            }
+            if !wait {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(failure(
+                    "terminal did not acknowledge the shared-memory graphics transfer",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     pub fn close_graphics(&mut self) -> HostResult<()> {
@@ -366,35 +507,104 @@ impl Terminal {
         if !self.graphics_active {
             return Ok(());
         }
+        #[cfg(unix)]
+        let settled = self.settle_pending_frame(true);
+        #[cfg(unix)]
+        self.pending_frames.clear();
+
+        let image = self.displayed_image;
         let mut output = io::stdout().lock();
-        let delete_a = write!(
-            output,
-            "\x1b_Ga=d,d=I,i={GRAPHICS_IMAGE_A},p={GRAPHICS_PLACEMENT_ID},q=2;\x1b\\"
-        );
-        let delete_b = write!(
-            output,
-            "\x1b_Ga=d,d=I,i={GRAPHICS_IMAGE_B},p={GRAPHICS_PLACEMENT_ID},q=2;\x1b\\"
-        );
+        let delete = match image {
+            Some(image) => write!(
+                output,
+                "\x1b_Ga=d,d=I,i={image},p={GRAPHICS_PLACEMENT_ID},q=2;\x1b\\"
+            ),
+            None => Ok(()),
+        };
         let leave = output
             .write_all(b"\x1b[?7h\x1b[?25h\x1b[?1049l")
             .and_then(|_| output.flush());
-        if leave.is_ok() {
-            self.graphics_active = false;
-            self.displayed_image = None;
+
+        // Terminal cleanup is best-effort, but host input and raw-mode
+        // restoration must not be held hostage by a failed terminal write.
+        self.graphics_active = false;
+        self.displayed_image = None;
+        #[cfg(unix)]
+        {
+            self.displayed_number = None;
+            self.graphics_medium = None;
         }
-        delete_a.and(delete_b).and(leave).map_err(Into::into)
+
+        #[cfg(unix)]
+        if let Err(error) = settled {
+            return Err(error);
+        }
+        delete.and(leave).map_err(Into::into)
     }
 
     #[cfg(unix)]
-    fn probe_graphics(&mut self) -> HostResult<()> {
+    fn probe_graphics(&mut self) -> HostResult<GraphicsMedium> {
+        let shared_memory_reply = {
+            let mut frame = SharedFrame::create(4).map_err(|error| {
+                failure(format!(
+                    "could not create Kitty shared-memory capability probe: {error}"
+                ))
+            })?;
+            frame.bytes_mut().copy_from_slice(&[0, 0, 0, 0]);
+            let name_length = base64_length(frame.name().len())?;
+            if self.encoded.len() < name_length {
+                self.encoded.resize(name_length, 0);
+            }
+            STANDARD
+                .encode_slice(frame.name(), &mut self.encoded[..name_length])
+                .map_err(|error| {
+                    failure(format!(
+                        "could not base64 encode Kitty shared-memory probe name: {error}"
+                    ))
+                })?;
+            let mut output = io::stdout().lock();
+            write!(
+                output,
+                "\x1b_Ga=q,i={GRAPHICS_SHM_QUERY_ID},s=1,v=1,S=4,t=s,f=32;"
+            )?;
+            output.write_all(&self.encoded[..name_length])?;
+            output.write_all(b"\x1b\\\x1b[c")?;
+            output.flush()?;
+            drop(output);
+            self.wait_for_probe_reply(GRAPHICS_SHM_QUERY_ID, true)?
+        };
+        match shared_memory_reply {
+            Ok(()) => Ok(GraphicsMedium::SharedMemory),
+            // A Kitty error for the actual t=s request proves that this
+            // terminal connection cannot use our local POSIX SHM namespace.
+            Err(_) => self.probe_direct_graphics(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn probe_direct_graphics(&mut self) -> HostResult<GraphicsMedium> {
         {
             let mut output = io::stdout().lock();
             write!(
                 output,
-                "\x1b_Ga=q,i={GRAPHICS_QUERY_ID},s=1,v=1,t=d,f=24;AAAA\x1b\\\x1b[c"
+                "\x1b_Ga=q,i={GRAPHICS_QUERY_ID},s=1,v=1,t=d,f=24;AAAA\x1b\\"
             )?;
             output.flush()?;
         }
+        match self.wait_for_probe_reply(GRAPHICS_QUERY_ID, false)? {
+            Ok(()) => Ok(GraphicsMedium::Direct),
+            Err(message) => Err(failure(format!(
+                "terminal rejected both Kitty shared-memory and direct graphics queries: {message}"
+            ))),
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_probe_reply(
+        &mut self,
+        image: u32,
+        device_attributes_mean_unsupported: bool,
+    ) -> HostResult<Result<(), String>> {
         let input = self
             .input
             .as_mut()
@@ -402,23 +612,44 @@ impl Terminal {
         let deadline = Instant::now() + QUERY_WAIT;
         loop {
             input.drain(false)?;
-            if let Some(status) = input.take_kitty_status(GRAPHICS_QUERY_ID) {
-                return if status {
-                    Ok(())
-                } else {
-                    Err(failure(
-                        "terminal rejected the Kitty graphics capability query",
-                    ))
-                };
+            if let Some(reply) = input.take_kitty_reply(image) {
+                return Ok(reply);
             }
             if input.take_device_attributes() {
-                return Err(failure(
-                    "terminal does not support the Kitty graphics protocol",
-                ));
+                if device_attributes_mean_unsupported {
+                    return Err(failure(
+                        "terminal does not support the Kitty graphics protocol",
+                    ));
+                }
             }
             if Instant::now() >= deadline {
                 return Err(failure(
                     "terminal did not respond to the Kitty graphics protocol query",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_image_number_reply(&mut self, number: u32) -> HostResult<u32> {
+        let input = self
+            .input
+            .as_mut()
+            .ok_or_else(|| failure("controlling terminal input is unavailable"))?;
+        let deadline = Instant::now() + QUERY_WAIT;
+        loop {
+            input.drain(false)?;
+            if let Some(reply) = input.take_kitty_reply_for_number(number) {
+                return reply.map_err(|message| {
+                    failure(format!(
+                        "terminal rejected direct graphics transfer: {message}"
+                    ))
+                });
+            }
+            if Instant::now() >= deadline {
+                return Err(failure(
+                    "terminal did not acknowledge the direct graphics transfer",
                 ));
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -567,9 +798,9 @@ impl TtyInput {
         self.read_available()?;
         while let Some(input) = self.next(allow_escape_timeout) {
             match input {
-                // q=1 suppresses successful transfer acknowledgements, but
-                // consume them if a terminal sends one anyway.
-                Input::Control(control) if session_acknowledgement(&control) => {}
+                // Graphics replies stay in the control queue until the
+                // session that owns their image id consumes them. They never
+                // become keyboard tokens.
                 Input::Control(control) => self.controls.push_back(control),
                 Input::Key(key) => self.keys.push_back(key),
             }
@@ -636,7 +867,7 @@ impl TtyInput {
         }
     }
 
-    fn take_kitty_status(&mut self, id: u32) -> Option<bool> {
+    fn take_kitty_reply(&mut self, id: u32) -> Option<Result<(), String>> {
         let index = self.controls.iter().position(|control| {
             matches!(
                 control,
@@ -644,28 +875,21 @@ impl TtyInput {
             )
         })?;
         match self.controls.remove(index)? {
-            Control::Kitty { payload, .. } => Some(payload.as_slice() == b"OK"),
+            Control::Kitty { payload, .. } if payload.as_slice() == b"OK" => Some(Ok(())),
+            Control::Kitty { payload, .. } => {
+                Some(Err(String::from_utf8_lossy(&payload).into_owned()))
+            }
             Control::Csi(_) => None,
         }
     }
 
-    fn take_session_error(&mut self) -> Option<String> {
-        let index = self.controls.iter().position(|control| {
-            matches!(
-                control,
-                Control::Kitty {
-                    parameters,
-                    payload
-                } if matches!(
-                    kitty_id(parameters),
-                    Some(GRAPHICS_IMAGE_A | GRAPHICS_IMAGE_B)
-                ) && payload.as_slice() != b"OK"
-            )
-        })?;
-        match self.controls.remove(index)? {
-            Control::Kitty { payload, .. } => Some(String::from_utf8_lossy(&payload).into_owned()),
-            Control::Csi(_) => None,
-        }
+    fn take_kitty_reply_for_number(&mut self, number: u32) -> Option<Result<u32, String>> {
+        let index = self
+            .controls
+            .iter()
+            .position(|control| image_number_reply(control, number).is_some())?;
+        let control = self.controls.remove(index)?;
+        image_number_reply(&control, number)
     }
 
     fn take_device_attributes(&mut self) -> bool {
@@ -832,17 +1056,46 @@ fn kitty_id(parameters: &[u8]) -> Option<u32> {
         .and_then(|value| value.parse().ok())
 }
 
-fn session_acknowledgement(control: &Control) -> bool {
-    matches!(
-        control,
-        Control::Kitty {
-            parameters,
-            payload
-        } if matches!(
-            kitty_id(parameters),
-            Some(GRAPHICS_IMAGE_A | GRAPHICS_IMAGE_B)
-        ) && payload.as_slice() == b"OK"
-    )
+fn kitty_number(parameters: &[u8]) -> Option<u32> {
+    parameters
+        .split(|byte| *byte == b',')
+        .find_map(|parameter| parameter.strip_prefix(b"I="))
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(|value| value.parse().ok())
+}
+
+fn image_number_reply(control: &Control, number: u32) -> Option<Result<u32, String>> {
+    let Control::Kitty {
+        parameters,
+        payload,
+    } = control
+    else {
+        return None;
+    };
+    if kitty_number(parameters) != Some(number) {
+        return None;
+    }
+    if payload.as_slice() != b"OK" {
+        return Some(Err(String::from_utf8_lossy(payload).into_owned()));
+    }
+    Some(match kitty_id(parameters) {
+        Some(image) if image != 0 => Ok(image),
+        Some(_) => Err("terminal acknowledged image number with invalid image id 0".to_owned()),
+        None => Err("terminal acknowledged image number without an image id".to_owned()),
+    })
+}
+
+fn rgba_byte_length(width: i32, height: i32) -> HostResult<usize> {
+    let width = usize::try_from(width).map_err(|_| failure("canvas width must be positive"))?;
+    let height = usize::try_from(height).map_err(|_| failure("canvas height must be positive"))?;
+    if width == 0 || height == 0 {
+        return Err(failure("canvas dimensions must be positive"));
+    }
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|length| *length <= isize::MAX as usize)
+        .ok_or_else(|| failure("canvas RGBA frame is too large for shared-memory transfer"))
 }
 
 fn pixel_size(sequence: &[u8]) -> Option<(u16, u16)> {
@@ -934,7 +1187,10 @@ fn key_token(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_csi_control, parse_kitty_control, pixel_size, Control};
+    use super::{
+        image_number_reply, kitty_id, kitty_number, parse_csi_control, parse_kitty_control,
+        pixel_size, rgba_byte_length, Control,
+    };
 
     #[test]
     fn fragmented_kitty_reply_waits_for_terminator() {
@@ -964,5 +1220,26 @@ mod tests {
             Some((_, Control::Csi(_)))
         ));
         assert!(parse_csi_control(b"\x1b[A").is_none());
+    }
+
+    #[test]
+    fn image_number_ack_identifies_terminal_owned_image() {
+        let control = Control::Kitty {
+            parameters: b"i=7340032,I=2147483647,p=2147483645".to_vec(),
+            payload: b"OK".to_vec(),
+        };
+        assert_eq!(
+            image_number_reply(&control, 2_147_483_647),
+            Some(Ok(7_340_032))
+        );
+        assert_eq!(kitty_number(b"i=7340032,I=2147483647"), Some(2_147_483_647));
+        assert_eq!(kitty_id(b"i=7340032,I=2147483647"), Some(7_340_032));
+    }
+
+    #[test]
+    fn shared_memory_frame_size_requires_complete_rgba_image() {
+        assert_eq!(rgba_byte_length(2400, 1600).unwrap(), 15_360_000);
+        assert!(rgba_byte_length(0, 1600).is_err());
+        assert!(rgba_byte_length(i32::MAX, i32::MAX).is_err());
     }
 }

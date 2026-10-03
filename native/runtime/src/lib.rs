@@ -4,6 +4,7 @@
 mod graphics;
 mod process;
 mod terminal;
+mod terminal_shm;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -71,6 +72,23 @@ impl Host {
             self.graphics = Some(Graphics::new(&self.config.fonts)?);
         }
         Ok(self.graphics.as_mut().expect("graphics initialized above"))
+    }
+
+    fn open_terminal_graphics(&mut self) -> HostResult<()> {
+        self.terminal.open_graphics()?;
+        if let Err(error) = self.graphics().and_then(Graphics::begin_terminal_graphics) {
+            let _ = self.terminal.close_graphics();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn close_terminal_graphics(&mut self) -> HostResult<()> {
+        let result = self.terminal.close_graphics();
+        if let Some(graphics) = &mut self.graphics {
+            graphics.end_terminal_graphics();
+        }
+        result
     }
 
     fn terminal_present(&mut self, surface: u32, column: i32, row: i32) -> HostResult<()> {
@@ -220,6 +238,9 @@ impl Host {
             }
         }
         let restored = self.terminal.restore();
+        if let Some(graphics) = &mut self.graphics {
+            graphics.end_terminal_graphics();
+        }
         result.and(restored)
     }
 }
@@ -492,7 +513,7 @@ fn dispatch<'js>(
             value.set("height", height)?;
             value.into_js(ctx)
         }
-        "terminalGraphicsOpen" => result!(host.terminal.open_graphics()),
+        "terminalGraphicsOpen" => result!(host.open_terminal_graphics()),
         "terminalGraphicsSize" => {
             let (columns, rows, width, height) = native(ctx, host.terminal.graphics_size())?;
             let value = Object::new(ctx.clone())?;
@@ -506,7 +527,7 @@ fn dispatch<'js>(
             result!(host.terminal_present(arg!(0, u32), arg!(1, i32), arg!(2, i32)))
         }
         "terminalGraphicsReadKey" => result!(host.terminal.key()),
-        "terminalGraphicsClose" => result!(host.terminal.close_graphics()),
+        "terminalGraphicsClose" => result!(host.close_terminal_graphics()),
         "readKey" => result!(host.terminal.key()),
         "sleepMilliseconds" => result!(host.sleep(arg!(0, i32))),
         _ => Err(Exception::throw_type(

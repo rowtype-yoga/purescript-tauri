@@ -7,8 +7,8 @@ description = "Embedded PureScript JavaScript host with native graphics and term
 
 [dependencies]
 rquickjs = "0.9.0"
-# Keep upstream's default feature set for its CPU prebuilt binaries. No SVG,
-# textlayout or GPU feature is enabled; text is shaped by Rustybuzz below.
+# The common build stays display-independent; macOS terminal sessions add Metal
+# below. SVG/textlayout are unused; text is shaped by Rustybuzz.
 skia-safe = "=0.153.3"
 fontdb = "0.23.0"
 rustybuzz = "0.20.1"
@@ -21,4 +21,11 @@ base64 = "0.22.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Ganesh/Metal is selected only by terminal graphics. Keep the common dependency
+# CPU-only so headless exports remain available on platforms without Metal.
+skia-safe = { version = "=0.153.3", features = ["ganesh", "metal"] }
+objc2 = { version = "0.6.3", default-features = false }
+objc2-metal = { version = "0.3.2", default-features = false, features = ["MTLDevice", "MTLCommandQueue"] }
 
