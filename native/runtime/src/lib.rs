@@ -73,6 +73,14 @@ impl Host {
         Ok(self.graphics.as_mut().expect("graphics initialized above"))
     }
 
+    fn terminal_present(&mut self, surface: u32, column: i32, row: i32) -> HostResult<()> {
+        if self.graphics.is_none() {
+            self.graphics = Some(Graphics::new(&self.config.fonts)?);
+        }
+        let graphics = self.graphics.as_mut().expect("graphics initialized above");
+        self.terminal.present(graphics, surface, column, row)
+    }
+
     fn begin_video(
         &mut self,
         output: String,
@@ -484,6 +492,21 @@ fn dispatch<'js>(
             value.set("height", height)?;
             value.into_js(ctx)
         }
+        "terminalGraphicsOpen" => result!(host.terminal.open_graphics()),
+        "terminalGraphicsSize" => {
+            let (columns, rows, width, height) = native(ctx, host.terminal.graphics_size())?;
+            let value = Object::new(ctx.clone())?;
+            value.set("columns", columns)?;
+            value.set("rows", rows)?;
+            value.set("width", width)?;
+            value.set("height", height)?;
+            value.into_js(ctx)
+        }
+        "terminalGraphicsPresent" => {
+            result!(host.terminal_present(arg!(0, u32), arg!(1, i32), arg!(2, i32)))
+        }
+        "terminalGraphicsReadKey" => result!(host.terminal.key()),
+        "terminalGraphicsClose" => result!(host.terminal.close_graphics()),
         "readKey" => result!(host.terminal.key()),
         "sleepMilliseconds" => result!(host.sleep(arg!(0, i32))),
         _ => Err(Exception::throw_type(

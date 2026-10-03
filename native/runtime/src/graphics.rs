@@ -670,6 +670,24 @@ impl Graphics {
         Ok(())
     }
 
+    pub fn encode_png(&mut self, id: u32, output: &mut Vec<u8>) -> HostResult<()> {
+        let pixels = self
+            .raster(id)?
+            .surface
+            .peek_pixels()
+            .ok_or_else(|| failure("canvas raster pixels are unavailable"))?;
+        output.clear();
+        // Streaming frames favor encode latency over the smallest file. PNG
+        // remains lossless; avoid testing every filter and level-6 compression.
+        let mut options = skia_safe::png_encoder::Options::default();
+        options.filter_flags = skia_safe::png_encoder::FilterFlag::NONE;
+        options.z_lib_level = 1;
+        if !skia_safe::png_encoder::encode(&pixels, output, &options) {
+            return Err(failure("could not encode canvas PNG"));
+        }
+        Ok(())
+    }
+
     pub fn read_rgba(
         &mut self,
         id: u32,

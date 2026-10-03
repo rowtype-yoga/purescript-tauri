@@ -17,6 +17,7 @@ unicode-segmentation = "1.12"
 unicode-script = "0.5"
 crossterm = "0.28.1"
 ctrlc = { version = "3.4", features = ["termination"] }
+base64 = "0.22.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
