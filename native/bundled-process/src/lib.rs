@@ -483,6 +483,19 @@ fn raw_stream_bytes<'a>(request: &'a Request<'_>) -> Result<&'a [u8], String> {
     Ok(bytes)
 }
 
+fn write_native_stream(
+    mut stream: impl Write,
+    text: String,
+    stream_name: &str,
+) -> Result<(), String> {
+    stream
+        .write_all(text.as_bytes())
+        .map_err(|error| format!("Cannot write application {stream_name}: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("Cannot flush application {stream_name}: {error}"))
+}
+
 fn take_streams(streams: &Streams, owner: Option<&str>) -> Vec<Arc<Stream>> {
     let mut active = streams.active.lock();
     let ids: Vec<String> = active
@@ -522,6 +535,26 @@ async fn run(
         let mut command = Command::new(executable);
         command.args(arguments);
         execute(command, stdin)
+    })
+    .await
+    .map_err(|error| format!("Bundled process worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn stdout(text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let native_stdout = io::stdout();
+        write_native_stream(native_stdout.lock(), text, "stdout")
+    })
+    .await
+    .map_err(|error| format!("Bundled process worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn stderr(text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let native_stderr = io::stderr();
+        write_native_stream(native_stderr.lock(), text, "stderr")
     })
     .await
     .map_err(|error| format!("Bundled process worker failed: {error}"))?
@@ -602,7 +635,9 @@ async fn cancel<R: Runtime>(
 pub fn init<R: Runtime>(executables: &[&str]) -> TauriPlugin<R> {
     let executables: Vec<String> = executables.iter().map(|name| (*name).to_owned()).collect();
     Builder::new("bundled-process")
-        .invoke_handler(tauri::generate_handler![run, spawn, write, finish, cancel])
+        .invoke_handler(tauri::generate_handler![
+            run, spawn, write, finish, cancel, stdout, stderr
+        ])
         .setup(move |app, _| {
             for name in &executables {
                 validate_basename(name)

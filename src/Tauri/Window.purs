@@ -1,6 +1,7 @@
 -- | Native operations require core:window:allow-set-title,
+-- | core:window:allow-show, core:window:allow-set-focus,
 -- | core:window:allow-destroy and core:event:allow-listen/allow-unlisten.
-module Tauri.Window (CloseRequest, setTitle, onCloseRequested, preventClose, destroy) where
+module Tauri.Window (CloseRequest, setTitle, show, setFocus, onCloseRequested, preventClose, destroy) where
 
 import Prelude
 
@@ -12,6 +13,14 @@ import Tauri.Internal.Resource (acquireDisposer)
 
 setTitle :: String -> Aff Unit
 setTitle = toAffE <<< setTitleImpl
+
+-- | Make the current native window visible.
+show :: Aff Unit
+show = toAffE showImpl
+
+-- | Move keyboard focus to the current native window.
+setFocus :: Aff Unit
+setFocus = toAffE setFocusImpl
 
 -- | Call preventClose synchronously inside the callback BEFORE launching an
 -- | Aff for confirmation/save work. After that work succeeds, call destroy.
@@ -32,4 +41,7 @@ foreign import setTitleImpl :: String -> Effect (Promise Unit)
 foreign import onCloseRequestedImpl
   :: (CloseRequest -> Effect Unit)
   -> Effect (Promise (Effect Unit))
+
 foreign import destroyImpl :: Effect (Promise Unit)
+foreign import showImpl :: Effect (Promise Unit)
+foreign import setFocusImpl :: Effect (Promise Unit)

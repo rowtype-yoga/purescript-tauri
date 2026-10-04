@@ -2,6 +2,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export const setTitleImpl = title => () => getCurrentWindow().setTitle(title);
 
+export const showImpl = () => getCurrentWindow().show();
+
+export const setFocusImpl = () => getCurrentWindow().setFocus();
+
 export const onCloseRequestedImpl = handler => () =>
   getCurrentWindow().onCloseRequested(event => handler(event)());
 

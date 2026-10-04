@@ -1,7 +1,8 @@
 -- | Run explicitly allowlisted executables beside the native application.
 -- | Register tauri-plugin-bundled-process and grant its command permissions only
--- | to the webview that owns the process stream.
-module Tauri.Process (Result, Stream, run, spawn, write, finish, cancel) where
+-- | to the webview that owns a process stream. `stdout` and `stderr` require
+-- | bundled-process:allow-stdout and bundled-process:allow-stderr respectively.
+module Tauri.Process (Result, Stream, run, spawn, write, finish, cancel, stdout, stderr) where
 
 import Data.ArrayBuffer.Types (ArrayBuffer)
 import Effect (Effect)
@@ -44,6 +45,16 @@ finish stream = toAffE (finishImpl stream)
 cancel :: Stream -> Aff Unit
 cancel stream = toAffE (cancelImpl stream)
 
+-- | Write UTF-8 text to the native application's standard output and flush it.
+-- | Native I/O failures reject the Aff.
+stdout :: String -> Aff Unit
+stdout text = toAffE (stdoutImpl text)
+
+-- | Write UTF-8 text to the native application's standard error and flush it.
+-- | Native I/O failures reject the Aff.
+stderr :: String -> Aff Unit
+stderr text = toAffE (stderrImpl text)
+
 -- | An opaque stream owned by the webview that spawned it.
 foreign import data Stream :: Type
 
@@ -52,3 +63,5 @@ foreign import spawnImpl :: { executable :: String, arguments :: Array String } 
 foreign import writeImpl :: Stream -> ArrayBuffer -> Effect (Promise Unit)
 foreign import finishImpl :: Stream -> Effect (Promise Result)
 foreign import cancelImpl :: Stream -> Effect (Promise Unit)
+foreign import stdoutImpl :: String -> Effect (Promise Unit)
+foreign import stderrImpl :: String -> Effect (Promise Unit)

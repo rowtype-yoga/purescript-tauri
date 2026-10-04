@@ -17,3 +17,9 @@ export const finishImpl = stream => () =>
 
 export const cancelImpl = stream => () =>
   invoke("plugin:bundled-process|cancel", { stream });
+
+export const stdoutImpl = text => () =>
+  invoke("plugin:bundled-process|stdout", { text });
+
+export const stderrImpl = text => () =>
+  invoke("plugin:bundled-process|stderr", { text });
