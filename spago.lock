@@ -9,6 +9,9 @@
               "aff": ">=8.0.0 <9.0.0"
             },
             {
+              "arraybuffer-types": ">=3.0.0 <4.0.0"
+            },
+            {
               "arrays": ">=7.3.0 <8.0.0"
             },
             {
@@ -723,6 +726,12 @@
         "transformers",
         "unsafe-coerce"
       ]
+    },
+    "arraybuffer-types": {
+      "type": "registry",
+      "version": "3.0.2",
+      "integrity": "sha256-p05cJnSkyeoB7VHzMyc2Eb1RwUaB7Nl0sQSqEGNEUD8=",
+      "dependencies": []
     },
     "arrays": {
       "type": "registry",

@@ -12,5 +12,8 @@ repository = "https://github.com/rowtype-yoga/purescript-tauri"
 tauri-plugin = { version = "2.7", features = ["build"] }
 
 [dependencies]
+getrandom = "0.3"
+parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
+shared_child = { version = "1.1.2", default-features = false }
 tauri = { version = "2.12", default-features = false }

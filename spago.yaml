@@ -2,6 +2,7 @@ package:
   name: tauri
   dependencies:
     - aff: ">=8.0.0 <9.0.0"
+    - arraybuffer-types: ">=3.0.0 <4.0.0"
     - arrays: ">=7.3.0 <8.0.0"
     - control: ">=6.0.0 <7.0.0"
     - datetime: ">=6.1.0 <7.0.0"
