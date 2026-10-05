@@ -15,6 +15,8 @@ module Tauri.Native
   , absolutePath
   , environment
   , monotonicMilliseconds
+  , platform
+  , runApplicationTask
   , runApplication
   , measureText
   , beginVideo
@@ -41,6 +43,15 @@ type ProcessResult = { success :: Boolean, code :: Int, stderr :: String }
 
 -- | Launch the configured sibling application with literal arguments. Source
 -- | data, when present, is sent through stdin and never becomes an argument.
+-- | Output and the working directory are inherited. Waits for the task to exit
+-- | and reaps it; any remaining descendants in its process group are terminated.
+-- | Interrupts and source-delivery failures terminate the task and its group,
+-- | unlike `runApplication`, whose application survives an interrupted wait.
+runApplicationTask :: Array String -> Maybe String -> Effect ProcessResult
+runApplicationTask args input = runApplicationTaskImpl args (toNullable input)
+
+-- | Launch the configured sibling application with literal arguments. Source
+-- | data, when present, is sent through stdin and never becomes an argument.
 -- | Output is inherited; interrupting this wait does not terminate the app.
 runApplication :: Array String -> Maybe String -> Effect ProcessResult
 runApplication args input = runApplicationImpl args (toNullable input)
@@ -58,6 +69,10 @@ foreign import stderr :: String -> Effect Unit
 foreign import absolutePath :: String -> Effect String
 foreign import environment :: String -> Effect String
 foreign import monotonicMilliseconds :: Effect Number
+-- | The operating-system identifier used by Rust (`macos`, `linux`, `windows`,
+-- | and so on).
+foreign import platform :: Effect String
+foreign import runApplicationTaskImpl :: Array String -> Nullable String -> Effect ProcessResult
 foreign import runApplicationImpl :: Array String -> Nullable String -> Effect ProcessResult
 foreign import measureText :: String -> String -> Effect Metrics
 foreign import beginVideo :: { output :: String, fps :: Int, width :: Int, height :: Int } -> Effect Video

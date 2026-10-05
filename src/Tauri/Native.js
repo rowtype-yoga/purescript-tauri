@@ -16,6 +16,8 @@ export const stderr = text => () => { host().call("stderr", text); };
 export const absolutePath = path => () => host().call("absolutePath", path);
 export const environment = name => () => host().call("environment", name);
 export const monotonicMilliseconds = () => host().call("monotonicMilliseconds");
+export const platform = () => host().call("platform");
+export const runApplicationTaskImpl = args => input => () => host().call("runApplicationTask", args, input);
 export const runApplicationImpl = args => input => () => host().call("runApplication", args, input);
 export const measureText = font => text => () => host().call("measureText", font, text);
 export const beginVideo = options => () => host().call("beginVideo", options);

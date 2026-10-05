@@ -215,6 +215,19 @@ impl Host {
         )
     }
 
+    fn application_task(
+        &self,
+        args: Vec<String>,
+        source: Option<String>,
+    ) -> HostResult<process::Outcome> {
+        process::run_application_task(
+            &self.config.application,
+            &args,
+            source,
+            self.interrupted.clone(),
+        )
+    }
+
     fn sleep(&self, milliseconds: i32) -> HostResult<()> {
         if milliseconds < 0 {
             return Err(failure("sleep duration must not be negative"));
@@ -347,6 +360,18 @@ fn dispatch<'js>(
             .unwrap_or_default()
             .into_js(ctx),
         "monotonicMilliseconds" => (host.started.elapsed().as_secs_f64() * 1000.0).into_js(ctx),
+        "platform" => std::env::consts::OS.into_js(ctx),
+        "runApplicationTask" => {
+            let outcome = native(
+                ctx,
+                host.application_task(arg!(0, Vec<String>), arg!(1, Option<String>)),
+            )?;
+            let value = Object::new(ctx.clone())?;
+            value.set("success", outcome.success)?;
+            value.set("code", outcome.code)?;
+            value.set("stderr", outcome.stderr)?;
+            value.into_js(ctx)
+        }
         "runApplication" => {
             let outcome = native(
                 ctx,
@@ -557,6 +582,9 @@ static RUN_LOCK: Mutex<()> = Mutex::new(());
 static INTERRUPT: LazyLock<Result<Arc<AtomicBool>, String>> = LazyLock::new(|| {
     let flag = Arc::new(AtomicBool::new(false));
     let handler_flag = flag.clone();
+    // ctrlc's `termination` feature routes SIGINT and SIGTERM here on Unix.
+    // They intentionally share one cancellation state; native calls cannot
+    // distinguish which signal requested shutdown.
     ctrlc::set_handler(move || {
         handler_flag.store(true, Ordering::Relaxed);
     })
