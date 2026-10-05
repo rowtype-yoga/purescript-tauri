@@ -14,9 +14,9 @@ static NAME_SECRET: LazyLock<io::Result<[u8; 12]>> = LazyLock::new(|| {
     Ok(secret)
 });
 
-/// A POSIX shared-memory object whose mapping remains valid until the terminal
-/// acknowledges that it has read the frame. Dropping it always releases only
-/// this process's mapping and attempts to unlink only this object's name.
+/// A POSIX shared-memory object whose mapping remains valid until its owner
+/// releases the frame. Dropping it always releases only this process's mapping
+/// and attempts to unlink only this object's name.
 pub(crate) struct SharedFrame {
     name: [u8; 29],
     mapping: *mut u8,
@@ -100,8 +100,8 @@ impl SharedFrame {
     }
 
     pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
-        // The mapping is exclusively owned by this frame. The terminal only
-        // receives its name after rendering has written every byte.
+        // The mapping is exclusively owned by this frame. A consumer receives
+        // its name only after rendering has written every byte.
         unsafe { std::slice::from_raw_parts_mut(self.mapping, self.length) }
     }
 }
@@ -116,8 +116,8 @@ impl Drop for SharedFrame {
 }
 
 fn unlink(name: &[u8; 29]) {
-    // The Kitty protocol requires the terminal to unlink the object after it
-    // has read it. ENOENT is therefore expected on the successful path.
+    // A consumer may unlink the object after reading it. ENOENT is therefore
+    // expected on a successful hand-off path.
     unsafe {
         libc::shm_unlink(name.as_ptr().cast());
     }

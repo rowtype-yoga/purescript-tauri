@@ -9,6 +9,7 @@ export { nativeArguments as arguments };
 export const version = () => host().call("version");
 export const isStdinTTY = () => host().call("isStdinTTY");
 export const readStdin = () => host().call("readStdin");
+export const readLineImpl = () => host().call("readLine");
 export const readText = path => () => host().call("readText", path);
 export const writeText = path => text => () => { host().call("writeText", path, text); };
 export const stdout = text => () => { host().call("stdout", text); };

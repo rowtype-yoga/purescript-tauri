@@ -151,7 +151,7 @@ pub(crate) struct Graphics {
     #[cfg(target_os = "macos")]
     metal: Option<MetalBackend>,
     #[cfg(target_os = "macos")]
-    terminal_graphics_active: bool,
+    metal_canvases_active: bool,
     next_surface: u32,
 }
 
@@ -209,7 +209,7 @@ impl Graphics {
             #[cfg(target_os = "macos")]
             metal: None,
             #[cfg(target_os = "macos")]
-            terminal_graphics_active: false,
+            metal_canvases_active: false,
             next_surface: 1,
         })
     }
@@ -456,29 +456,29 @@ impl Graphics {
             .ok_or_else(|| failure(format!("unknown canvas surface: {id}")))
     }
 
-    pub fn begin_terminal_graphics(&mut self) -> HostResult<()> {
+    /// Enable Metal-backed canvas allocation without acquiring terminal state.
+    pub fn begin_metal_canvases(&mut self) -> HostResult<()> {
         #[cfg(target_os = "macos")]
         {
             if self.metal.is_none() {
                 self.metal = Some(MetalBackend::new()?);
             }
-            self.terminal_graphics_active = true;
+            self.metal_canvases_active = true;
             Ok(())
         }
         #[cfg(not(target_os = "macos"))]
         {
-            Err(failure(
-                "GPU terminal graphics are unsupported on this platform",
-            ))
+            Err(failure("Metal canvases are unsupported on this platform"))
         }
     }
 
-    pub fn end_terminal_graphics(&mut self) {
+    /// Return future canvas allocation to the normal CPU backend.
+    pub fn end_metal_canvases(&mut self) {
         // Do not drop Metal here: existing Ganesh surfaces retain GPU resources
         // and must outlive the DirectContext. This changes only future creates.
         #[cfg(target_os = "macos")]
         {
-            self.terminal_graphics_active = false;
+            self.metal_canvases_active = false;
         }
     }
 
@@ -489,7 +489,7 @@ impl Graphics {
             .checked_add(1)
             .ok_or_else(|| failure("canvas handles exhausted"))?;
         #[cfg(target_os = "macos")]
-        let (mut surface, backend) = if self.terminal_graphics_active {
+        let (mut surface, backend) = if self.metal_canvases_active {
             let info = ImageInfo::new(
                 (width, height),
                 ColorType::RGBA8888,
@@ -953,10 +953,10 @@ mod metal_tests {
     use super::*;
 
     #[test]
-    fn terminal_canvases_are_metal_backed_and_read_straight_rgba() {
+    fn metal_canvases_are_metal_backed_and_read_straight_rgba() {
         let mut graphics = Graphics::new(&[]).expect("system fonts are available");
         graphics
-            .begin_terminal_graphics()
+            .begin_metal_canvases()
             .expect("Metal Ganesh initializes");
         let gpu = graphics.create(1, 1).expect("Metal surface allocates");
         assert!(
@@ -984,7 +984,7 @@ mod metal_tests {
             );
         }
 
-        graphics.end_terminal_graphics();
+        graphics.end_metal_canvases();
         let cpu = graphics.create(1, 1).expect("CPU surface allocates");
         assert!(
             !graphics

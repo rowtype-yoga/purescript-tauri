@@ -9,7 +9,7 @@ mod terminal_shm;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +24,8 @@ use rquickjs::{
 use graphics::Graphics;
 use process::Process;
 use terminal::Terminal;
+#[cfg(unix)]
+use terminal_shm::SharedFrame;
 
 pub struct FontAsset {
     pub family: &'static str,
@@ -56,12 +58,26 @@ struct Video {
     height: i32,
 }
 
+#[cfg(unix)]
+struct ExportedFrame {
+    frame: SharedFrame,
+    width: i32,
+    height: i32,
+    byte_length: i32,
+}
+
 struct Host {
     config: Config,
     graphics: Option<Graphics>,
     videos: HashMap<u32, Video>,
     next_video: u32,
+    #[cfg(unix)]
+    frames: HashMap<u32, ExportedFrame>,
+    #[cfg(unix)]
+    next_frame: u32,
+    shared_frames_active: bool,
     terminal: Terminal,
+    stdin: io::BufReader<io::Stdin>,
     started: Instant,
     interrupted: Arc<AtomicBool>,
 }
@@ -74,19 +90,148 @@ impl Host {
         Ok(self.graphics.as_mut().expect("graphics initialized above"))
     }
 
+    fn open_shared_frames(&mut self) -> HostResult<()> {
+        if self.shared_frames_active {
+            return Ok(());
+        }
+        self.graphics()?.begin_metal_canvases()?;
+        self.shared_frames_active = true;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn capture_shared_frame(&mut self, surface: u32) -> HostResult<u32> {
+        if !self.shared_frames_active {
+            return Err(failure("shared-frame renderer has not been opened"));
+        }
+        let (width, height, byte_length, frame) = {
+            let graphics = self.graphics()?;
+            let (width, height) = graphics.dimensions(surface)?;
+            if width <= 0 || height <= 0 {
+                return Err(failure("canvas dimensions must be positive"));
+            }
+            let byte_length = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|size| size.checked_mul(4))
+                .ok_or_else(|| failure("canvas dimensions overflow the RGBA buffer size"))?;
+            let byte_length = i32::try_from(byte_length)
+                .map_err(|_| failure("canvas RGBA buffer exceeds native frame limits"))?;
+            let mut frame = SharedFrame::create(byte_length as usize).map_err(|error| {
+                failure(format!("could not create shared-memory frame: {error}"))
+            })?;
+            graphics.read_rgba(surface, width, height, frame.bytes_mut())?;
+            (width, height, byte_length, frame)
+        };
+        let id = self.next_frame;
+        let next = id
+            .checked_add(1)
+            .filter(|next| *next <= i32::MAX as u32)
+            .ok_or_else(|| failure("shared-frame handle space exhausted"))?;
+        self.frames.insert(
+            id,
+            ExportedFrame {
+                frame,
+                width,
+                height,
+                byte_length,
+            },
+        );
+        self.next_frame = next;
+        Ok(id)
+    }
+
+    #[cfg(not(unix))]
+    fn capture_shared_frame(&mut self, _surface: u32) -> HostResult<u32> {
+        Err(failure("shared-memory frames are supported only on Unix"))
+    }
+
+    #[cfg(unix)]
+    fn shared_frame_info(&self, id: u32) -> HostResult<(&[u8], i32, i32, i32)> {
+        let frame = self
+            .frames
+            .get(&id)
+            .ok_or_else(|| failure("shared-memory frame is not open"))?;
+        Ok((
+            frame.frame.name(),
+            frame.width,
+            frame.height,
+            frame.byte_length,
+        ))
+    }
+
+    #[cfg(not(unix))]
+    fn shared_frame_info(&self, _id: u32) -> HostResult<(&[u8], i32, i32, i32)> {
+        Err(failure("shared-memory frames are supported only on Unix"))
+    }
+
+    fn release_shared_frame(&mut self, id: u32) -> HostResult<()> {
+        #[cfg(unix)]
+        self.frames.remove(&id);
+        Ok(())
+    }
+
+    fn close_shared_frames(&mut self) -> HostResult<()> {
+        #[cfg(unix)]
+        self.frames.clear();
+        if self.shared_frames_active {
+            if let Some(graphics) = &mut self.graphics {
+                graphics.end_metal_canvases();
+            }
+            self.shared_frames_active = false;
+        }
+        Ok(())
+    }
+
+    fn read_stdin(&mut self) -> HostResult<String> {
+        if self.interrupted.load(Ordering::Relaxed) {
+            return Err(failure("interrupted"));
+        }
+        let mut source = String::new();
+        self.stdin.read_to_string(&mut source)?;
+        if self.interrupted.load(Ordering::Relaxed) {
+            return Err(failure("interrupted"));
+        }
+        Ok(source)
+    }
+
+    fn read_line(&mut self) -> HostResult<Option<String>> {
+        if self.interrupted.load(Ordering::Relaxed) {
+            return Err(failure("interrupted"));
+        }
+        let mut line = String::new();
+        let bytes = self.stdin.read_line(&mut line)?;
+        if self.interrupted.load(Ordering::Relaxed) {
+            return Err(failure("interrupted"));
+        }
+        if bytes == 0 {
+            return Ok(None);
+        }
+        if line.ends_with('\n') {
+            line.pop();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+        }
+        Ok(Some(line))
+    }
+
     fn open_terminal_graphics(&mut self) -> HostResult<()> {
+        if self.shared_frames_active {
+            return Err(failure(
+                "cannot open terminal graphics while shared-frame renderer is open",
+            ));
+        }
         self.terminal.open_graphics()?;
-        if let Err(error) = self.graphics().and_then(Graphics::begin_terminal_graphics) {
+        if let Err(error) = self.graphics().and_then(Graphics::begin_metal_canvases) {
             let _ = self.terminal.close_graphics();
             return Err(error);
         }
         Ok(())
     }
-
     fn close_terminal_graphics(&mut self) -> HostResult<()> {
         let result = self.terminal.close_graphics();
         if let Some(graphics) = &mut self.graphics {
-            graphics.end_terminal_graphics();
+            graphics.end_metal_canvases();
         }
         result
     }
@@ -243,6 +388,7 @@ impl Host {
     }
 
     fn shutdown(&mut self) -> HostResult<()> {
+        self.close_shared_frames()?;
         let mut result = Ok(());
         for (_, video) in self.videos.drain() {
             let cancelled = video.process.cancel();
@@ -252,7 +398,7 @@ impl Host {
         }
         let restored = self.terminal.restore();
         if let Some(graphics) = &mut self.graphics {
-            graphics.end_terminal_graphics();
+            graphics.end_metal_canvases();
         }
         result.and(restored)
     }
@@ -340,11 +486,8 @@ fn dispatch<'js>(
         "arguments" => host.config.arguments.as_slice().into_js(ctx),
         "version" => host.config.version.as_str().into_js(ctx),
         "isStdinTTY" => io::stdin().is_terminal().into_js(ctx),
-        "readStdin" => result!((|| -> HostResult<String> {
-            let mut source = String::new();
-            io::stdin().read_to_string(&mut source)?;
-            Ok(source)
-        })()),
+        "readStdin" => result!(host.read_stdin()),
+        "readLine" => result!(host.read_line()),
         "readText" => result!(std::fs::read_to_string(arg!(0, String)).map_err(Into::into)),
         "writeText" => {
             result!(std::fs::write(arg!(0, String), arg!(1, String)).map_err(Into::into))
@@ -513,6 +656,27 @@ fn dispatch<'js>(
             let path = arg!(1, String);
             result!(native(ctx, host.graphics())?.png(id, &path))
         }
+        "sharedFrameOpen" => result!(host.open_shared_frames()),
+        "sharedFrameCapture" => result!(host.capture_shared_frame(arg!(0, u32))),
+        "sharedFrameInfo" => {
+            let id = arg!(0, u32);
+            let (name, width, height, byte_length) = native(ctx, host.shared_frame_info(id))?;
+            let value = Object::new(ctx.clone())?;
+            value.set(
+                "id",
+                i32::try_from(id).expect("shared-frame IDs fit PureScript Int"),
+            )?;
+            value.set(
+                "name",
+                std::str::from_utf8(name).expect("shared-memory names are ASCII"),
+            )?;
+            value.set("width", width)?;
+            value.set("height", height)?;
+            value.set("byteLength", byte_length)?;
+            value.into_js(ctx)
+        }
+        "sharedFrameRelease" => result!(host.release_shared_frame(arg!(0, u32))),
+        "sharedFrameClose" => result!(host.close_shared_frames()),
         "beginVideo" => {
             let options = arg!(0, Object<'js>);
             result!(host.begin_video(
@@ -629,7 +793,13 @@ pub fn run(script: &str, config: Config) -> Result<i32, Box<dyn Error>> {
         graphics: None,
         videos: HashMap::new(),
         next_video: 1,
+        #[cfg(unix)]
+        frames: HashMap::new(),
+        #[cfg(unix)]
+        next_frame: 1,
+        shared_frames_active: false,
         terminal: Terminal::default(),
+        stdin: io::BufReader::new(io::stdin()),
         started: Instant::now(),
         interrupted: interrupted.clone(),
     }));

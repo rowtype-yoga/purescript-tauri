@@ -1,0 +1,34 @@
+-- | POSIX shared-memory RGBA frames backed by the native Metal canvas renderer.
+module Tauri.Native.SharedFrame
+  ( Frame
+  , open
+  , capture
+  , info
+  , release
+  , close
+  ) where
+
+import Prelude (Unit)
+
+import Effect (Effect)
+import Tauri.Native.Canvas (Surface)
+
+foreign import data Frame :: Type
+
+-- | Enable Metal-backed canvas allocation without interacting with a terminal.
+foreign import open :: Effect Unit
+
+-- | Read a canvas's straight RGBA pixels directly into an owned shared mapping.
+foreign import capture :: Surface -> Effect Frame
+
+-- | Metadata for an open frame. `name` is the POSIX name, including its leading
+-- | slash, and `byteLength` is the RGBA mapping length.
+foreign import info
+  :: Frame
+  -> { id :: Int, name :: String, width :: Int, height :: Int, byteLength :: Int }
+
+-- | Release this frame's mapping. Releasing an already released frame is safe.
+foreign import release :: Frame -> Effect Unit
+
+-- | Release every remaining frame and return future canvases to the normal backend.
+foreign import close :: Effect Unit

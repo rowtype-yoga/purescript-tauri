@@ -8,6 +8,7 @@ module Tauri.Native
   , version
   , isStdinTTY
   , readStdin
+  , readLine
   , readText
   , writeText
   , stdout
@@ -33,7 +34,7 @@ module Tauri.Native
 import Prelude
 
 import Data.Maybe (Maybe)
-import Data.Nullable (Nullable, toNullable)
+import Data.Nullable (Nullable, toMaybe, toNullable)
 import Effect (Effect)
 import Tauri.Native.Canvas (Surface)
 
@@ -56,12 +57,18 @@ runApplicationTask args input = runApplicationTaskImpl args (toNullable input)
 runApplication :: Array String -> Maybe String -> Effect ProcessResult
 runApplication args input = runApplicationImpl args (toNullable input)
 
+-- | Read one UTF-8 line from stdin, without consuming any following input.
+-- | Returns `Nothing` only at EOF.
+readLine :: Effect (Maybe String)
+readLine = toMaybe <$> readLineImpl
+
 foreign import data Video :: Type
 
 foreign import arguments :: Effect (Array String)
 foreign import version :: Effect String
 foreign import isStdinTTY :: Effect Boolean
 foreign import readStdin :: Effect String
+foreign import readLineImpl :: Effect (Nullable String)
 foreign import readText :: String -> Effect String
 foreign import writeText :: String -> String -> Effect Unit
 foreign import stdout :: String -> Effect Unit
