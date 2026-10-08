@@ -5,8 +5,10 @@ edition = "2021"
 license = "MIT"
 description = "Embedded PureScript JavaScript host with native graphics and terminal primitives"
 
-[dependencies]
+[target.'cfg(not(target_os = "macos"))'.dependencies]
 rquickjs = "0.9.0"
+
+[dependencies]
 # The common build stays display-independent; macOS terminal sessions add Metal
 # below. SVG/textlayout are unused; text is shaped by Rustybuzz.
 skia-safe = "=0.153.3"

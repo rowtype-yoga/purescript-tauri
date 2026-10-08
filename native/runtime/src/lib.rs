@@ -1,25 +1,36 @@
 //! Synchronous native primitives for a bundled PureScript JavaScript program.
 //! The host has no graph, document, command-line or application lifecycle policy.
+//!
+//! macOS uses system JavaScriptCore; sign the application with
+//! `com.apple.security.cs.allow-jit` to enable native-code compilation.
+//! Other platforms use QuickJS.
 
 mod graphics;
+#[cfg(target_os = "macos")]
+mod jsc;
 mod process;
 mod terminal;
 mod terminal_shm;
 
+#[cfg(not(target_os = "macos"))]
+use rquickjs::function::{Func, Rest};
+#[cfg(not(target_os = "macos"))]
+use rquickjs::{
+    Array, CaughtError, Context, Ctx, Exception, FromJs, Function, IntoJs, Object, Runtime, Value,
+};
+#[cfg(not(target_os = "macos"))]
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+#[cfg(not(target_os = "macos"))]
+use std::io::IsTerminal;
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "macos"))]
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
-
-use rquickjs::function::{Func, Rest};
-use rquickjs::{
-    Array, CaughtError, Context, Ctx, Exception, FromJs, Function, IntoJs, Object, Runtime, Value,
-};
 
 use graphics::Graphics;
 use process::Process;
@@ -404,10 +415,12 @@ impl Host {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn native<'js, T>(ctx: &Ctx<'js>, result: HostResult<T>) -> rquickjs::Result<T> {
     result.map_err(|error| Exception::throw_message(ctx, &error.to_string()))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn argument<'js, T: FromJs<'js>>(
     ctx: &Ctx<'js>,
     args: &[Value<'js>],
@@ -419,6 +432,7 @@ fn argument<'js, T: FromJs<'js>>(
     T::from_js(ctx, value.clone())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn canvas_color(value: Object<'_>) -> rquickjs::Result<graphics::Color> {
     Ok([
         value.get("r")?,
@@ -428,6 +442,7 @@ fn canvas_color(value: Object<'_>) -> rquickjs::Result<graphics::Color> {
     ])
 }
 
+#[cfg(not(target_os = "macos"))]
 fn canvas_affine(value: Object<'_>) -> rquickjs::Result<[f32; 6]> {
     Ok([
         value.get("a")?,
@@ -439,6 +454,7 @@ fn canvas_affine(value: Object<'_>) -> rquickjs::Result<[f32; 6]> {
     ])
 }
 
+#[cfg(not(target_os = "macos"))]
 fn canvas_stroke(value: Object<'_>) -> rquickjs::Result<graphics::Stroke> {
     Ok(graphics::Stroke {
         color: canvas_color(value.get("color")?)?,
@@ -448,6 +464,7 @@ fn canvas_stroke(value: Object<'_>) -> rquickjs::Result<graphics::Stroke> {
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 fn canvas_path<'js>(ctx: &Ctx<'js>, value: Object<'js>) -> rquickjs::Result<skia_safe::Path> {
     let values: Array<'js> = value.get("values")?;
     let offset: i32 = value.get("offset")?;
@@ -466,6 +483,7 @@ fn canvas_path<'js>(ctx: &Ctx<'js>, value: Object<'js>) -> rquickjs::Result<skia
     )
 }
 
+#[cfg(not(target_os = "macos"))]
 fn dispatch<'js>(
     ctx: &Ctx<'js>,
     host: &mut Host,
@@ -756,6 +774,7 @@ static INTERRUPT: LazyLock<Result<Arc<AtomicBool>, String>> = LazyLock::new(|| {
     Ok(flag)
 });
 
+#[cfg(not(target_os = "macos"))]
 fn register<'js>(ctx: &Ctx<'js>, state: Rc<RefCell<Host>>) -> rquickjs::Result<()> {
     let host = Object::new(ctx.clone())?;
     host.set(
@@ -779,6 +798,7 @@ fn register<'js>(ctx: &Ctx<'js>, state: Rc<RefCell<Host>>) -> rquickjs::Result<(
 /// integer exit status. Native exceptions become ordinary JS Error instances.
 /// Terminal state and child processes are released on success, JS errors and
 /// Rust unwinding. Only one terminal-owning runtime may run in a process at once.
+#[cfg(not(target_os = "macos"))]
 pub fn run(script: &str, config: Config) -> Result<i32, Box<dyn Error>> {
     let _guard = RUN_LOCK
         .lock()
@@ -843,4 +863,9 @@ pub fn run(script: &str, config: Config) -> Result<i32, Box<dyn Error>> {
     } else {
         outcome
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn run(script: &str, config: Config) -> Result<i32, Box<dyn Error>> {
+    jsc::run(script, config)
 }
