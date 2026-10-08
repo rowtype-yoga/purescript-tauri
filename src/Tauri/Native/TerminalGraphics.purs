@@ -14,7 +14,8 @@ import Effect (Effect)
 import Tauri.Native.Canvas (Surface)
 
 -- | Require a usable TTY, verify Kitty graphics support, then acquire a
--- | fullscreen terminal session with Metal-backed canvases on macOS.
+-- | fullscreen terminal session and verify Metal availability on macOS.
+-- | Canvas allocation selects its backend explicitly.
 -- | Throws when the protocol or GPU backend is unavailable.
 foreign import open :: Effect Unit
 

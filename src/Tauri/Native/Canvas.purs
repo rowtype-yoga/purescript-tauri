@@ -1,9 +1,9 @@
 -- | Reusable Skia canvases. Requires tauri-native-host.
--- | Normally CPU-backed; canvases created during a macOS terminal graphics
--- | session use Metal instead.
+-- | Each canvas explicitly selects its CPU or macOS Metal backend.
 -- | Surface handles must be released when their owner is finished drawing.
 module Tauri.Native.Canvas
   ( Surface
+  , Backend(..)
   , Color
   , Affine
   , Rect
@@ -37,6 +37,14 @@ import Prelude
 import Data.Maybe (Maybe)
 import Data.Nullable (Nullable, toNullable)
 import Effect (Effect)
+
+data Backend = Cpu | Metal
+
+-- | Metal allocation fails explicitly when the platform or device is unavailable.
+create :: Backend -> { width :: Int, height :: Int } -> Effect Surface
+create backend = createImpl case backend of
+  Cpu -> "cpu"
+  Metal -> "metal"
 
 -- | Straight (unpremultiplied) RGBA channels in 0..255.
 type Color = { r :: Int, g :: Int, b :: Int, a :: Int }
@@ -82,7 +90,7 @@ setTint target color = setTintImpl target (toNullable color)
 
 foreign import data Surface :: Type
 
-foreign import create :: { width :: Int, height :: Int } -> Effect Surface
+foreign import createImpl :: String -> { width :: Int, height :: Int } -> Effect Surface
 foreign import release :: Surface -> Effect Unit
 -- | Clear transparent and reset transform, clipping, styles and save stack.
 foreign import reset :: Surface -> Effect Unit

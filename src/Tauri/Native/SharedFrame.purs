@@ -15,7 +15,8 @@ import Tauri.Native.Canvas (Surface)
 
 foreign import data Frame :: Type
 
--- | Enable Metal-backed canvas allocation without interacting with a terminal.
+-- | Open frame ownership and verify Metal without interacting with a terminal.
+-- | Canvas allocation selects its backend explicitly.
 foreign import open :: Effect Unit
 
 -- | Read a canvas's straight RGBA pixels directly into an owned shared mapping.
@@ -30,5 +31,5 @@ foreign import info
 -- | Release this frame's mapping. Releasing an already released frame is safe.
 foreign import release :: Frame -> Effect Unit
 
--- | Release every remaining frame and return future canvases to the normal backend.
+-- | Release every remaining frame. Existing canvases retain their own backend.
 foreign import close :: Effect Unit

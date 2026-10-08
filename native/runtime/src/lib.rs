@@ -105,7 +105,7 @@ impl Host {
         if self.shared_frames_active {
             return Ok(());
         }
-        self.graphics()?.begin_metal_canvases()?;
+        self.graphics()?.ensure_metal()?;
         self.shared_frames_active = true;
         Ok(())
     }
@@ -184,12 +184,7 @@ impl Host {
     fn close_shared_frames(&mut self) -> HostResult<()> {
         #[cfg(unix)]
         self.frames.clear();
-        if self.shared_frames_active {
-            if let Some(graphics) = &mut self.graphics {
-                graphics.end_metal_canvases();
-            }
-            self.shared_frames_active = false;
-        }
+        self.shared_frames_active = false;
         Ok(())
     }
 
@@ -233,18 +228,14 @@ impl Host {
             ));
         }
         self.terminal.open_graphics()?;
-        if let Err(error) = self.graphics().and_then(Graphics::begin_metal_canvases) {
+        if let Err(error) = self.graphics().and_then(Graphics::ensure_metal) {
             let _ = self.terminal.close_graphics();
             return Err(error);
         }
         Ok(())
     }
     fn close_terminal_graphics(&mut self) -> HostResult<()> {
-        let result = self.terminal.close_graphics();
-        if let Some(graphics) = &mut self.graphics {
-            graphics.end_metal_canvases();
-        }
-        result
+        self.terminal.close_graphics()
     }
 
     fn terminal_present(&mut self, surface: u32, column: i32, row: i32) -> HostResult<()> {
@@ -408,9 +399,6 @@ impl Host {
             }
         }
         let restored = self.terminal.restore();
-        if let Some(graphics) = &mut self.graphics {
-            graphics.end_metal_canvases();
-        }
         result.and(restored)
     }
 }
@@ -559,10 +547,11 @@ fn dispatch<'js>(
             value.into_js(ctx)
         }
         "canvasCreate" => {
-            let options = arg!(0, Object<'js>);
+            let backend = arg!(0, String);
+            let options = arg!(1, Object<'js>);
             let width = options.get("width")?;
             let height = options.get("height")?;
-            result!(native(ctx, host.graphics())?.create(width, height))
+            result!(native(ctx, host.graphics())?.create(&backend, width, height))
         }
         "canvasRelease" => {
             result!(native(ctx, host.graphics())?.release(arg!(0, u32)))

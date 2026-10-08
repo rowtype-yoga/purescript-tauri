@@ -695,9 +695,11 @@ fn dispatch(
             Ok(value.cast_const())
         }
         "canvasCreate" => {
-            let options = api.object(args, 0)?;
+            let backend = api.arg_string(args, 0)?;
+            let options = api.object(args, 1)?;
             let graphics = api.native(host.graphics())?;
             api.native(graphics.create(
+                &backend,
                 api.property_i32(options, "width")?,
                 api.property_i32(options, "height")?,
             ))
@@ -1247,7 +1249,7 @@ mod tests {
                 const host = globalThis.__purescriptNativeHost;
                 try { host.call("missingPrimitive"); return 1; }
                 catch (error) { if (!(error instanceof TypeError)) return 2; }
-                const canvas = host.call("canvasCreate", {width:4,height:4});
+                const canvas = host.call("canvasCreate", "cpu", {width:4,height:4});
                 try {
                     host.call("canvasFillPath", canvas,
                         {values:[0,0,0],offset:-1,length:3}, {r:0,g:0,b:0,a:255});

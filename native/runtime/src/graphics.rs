@@ -150,8 +150,6 @@ pub(crate) struct Graphics {
     surfaces: HashMap<u32, Raster>,
     #[cfg(target_os = "macos")]
     metal: Option<MetalBackend>,
-    #[cfg(target_os = "macos")]
-    metal_canvases_active: bool,
     next_surface: u32,
 }
 
@@ -208,8 +206,6 @@ impl Graphics {
             surfaces: HashMap::new(),
             #[cfg(target_os = "macos")]
             metal: None,
-            #[cfg(target_os = "macos")]
-            metal_canvases_active: false,
             next_surface: 1,
         })
     }
@@ -456,14 +452,13 @@ impl Graphics {
             .ok_or_else(|| failure(format!("unknown canvas surface: {id}")))
     }
 
-    /// Enable Metal-backed canvas allocation without acquiring terminal state.
-    pub fn begin_metal_canvases(&mut self) -> HostResult<()> {
+    /// Initialize Metal without changing the backend of any canvas allocation.
+    pub fn ensure_metal(&mut self) -> HostResult<()> {
         #[cfg(target_os = "macos")]
         {
             if self.metal.is_none() {
                 self.metal = Some(MetalBackend::new()?);
             }
-            self.metal_canvases_active = true;
             Ok(())
         }
         #[cfg(not(target_os = "macos"))]
@@ -472,60 +467,59 @@ impl Graphics {
         }
     }
 
-    /// Return future canvas allocation to the normal CPU backend.
-    pub fn end_metal_canvases(&mut self) {
-        // Do not drop Metal here: existing Ganesh surfaces retain GPU resources
-        // and must outlive the DirectContext. This changes only future creates.
-        #[cfg(target_os = "macos")]
-        {
-            self.metal_canvases_active = false;
-        }
-    }
-
-    pub fn create(&mut self, width: i32, height: i32) -> HostResult<u32> {
+    pub fn create(&mut self, requested_backend: &str, width: i32, height: i32) -> HostResult<u32> {
         rgba_size(width, height)?;
         let id = self.next_surface;
         let next = id
             .checked_add(1)
             .ok_or_else(|| failure("canvas handles exhausted"))?;
-        #[cfg(target_os = "macos")]
-        let (mut surface, backend) = if self.metal_canvases_active {
-            let info = ImageInfo::new(
-                (width, height),
-                ColorType::RGBA8888,
-                AlphaType::Premul,
-                None,
-            );
-            let metal = self
-                .metal
-                .as_mut()
-                .ok_or_else(|| failure("Metal terminal graphics backend is not initialized"))?;
-            let surface = gpu::surfaces::render_target(
-                &mut metal.context,
-                gpu::Budgeted::Yes,
-                &info,
-                0usize,
-                gpu::SurfaceOrigin::TopLeft,
-                None,
-                false,
-                false,
-            )
-            .ok_or_else(|| failure(format!("could not allocate {width}x{height} Metal canvas")))?;
-            (surface, SurfaceBackend::Metal)
-        } else {
-            (
+        let (mut surface, backend) = match requested_backend {
+            "cpu" => (
                 surfaces::raster_n32_premul((width, height)).ok_or_else(|| {
                     failure(format!("could not allocate {width}x{height} canvas"))
                 })?,
                 SurfaceBackend::Cpu,
-            )
+            ),
+            "metal" => {
+                #[cfg(target_os = "macos")]
+                {
+                    self.ensure_metal()?;
+                    let info = ImageInfo::new(
+                        (width, height),
+                        ColorType::RGBA8888,
+                        AlphaType::Premul,
+                        None,
+                    );
+                    let metal = self
+                        .metal
+                        .as_mut()
+                        .ok_or_else(|| failure("Metal canvas backend is not initialized"))?;
+                    let surface = gpu::surfaces::render_target(
+                        &mut metal.context,
+                        gpu::Budgeted::Yes,
+                        &info,
+                        0usize,
+                        gpu::SurfaceOrigin::TopLeft,
+                        None,
+                        false,
+                        false,
+                    )
+                    .ok_or_else(|| {
+                        failure(format!("could not allocate {width}x{height} Metal canvas"))
+                    })?;
+                    (surface, SurfaceBackend::Metal)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    return Err(failure("Metal canvases are unsupported on this platform"));
+                }
+            }
+            _ => {
+                return Err(failure(format!(
+                    "unknown canvas backend: {requested_backend:?}"
+                )))
+            }
         };
-        #[cfg(not(target_os = "macos"))]
-        let (mut surface, backend) = (
-            surfaces::raster_n32_premul((width, height))
-                .ok_or_else(|| failure(format!("could not allocate {width}x{height} canvas")))?,
-            SurfaceBackend::Cpu,
-        );
         // Preserve an untouched root clip so reset can discard every user clip.
         surface.canvas().save();
         self.surfaces.insert(
@@ -955,10 +949,9 @@ mod metal_tests {
     #[test]
     fn metal_canvases_are_metal_backed_and_read_straight_rgba() {
         let mut graphics = Graphics::new(&[]).expect("system fonts are available");
-        graphics
-            .begin_metal_canvases()
-            .expect("Metal Ganesh initializes");
-        let gpu = graphics.create(1, 1).expect("Metal surface allocates");
+        let gpu = graphics
+            .create("metal", 1, 1)
+            .expect("Metal surface allocates");
         assert!(
             graphics
                 .raster(gpu)
@@ -966,7 +959,7 @@ mod metal_tests {
                 .surface
                 .image_snapshot()
                 .is_texture_backed(),
-            "terminal surface must be a Ganesh texture, not a CPU raster"
+            "Metal selection must allocate a Ganesh texture, not a CPU raster"
         );
 
         graphics
@@ -984,8 +977,7 @@ mod metal_tests {
             );
         }
 
-        graphics.end_metal_canvases();
-        let cpu = graphics.create(1, 1).expect("CPU surface allocates");
+        let cpu = graphics.create("cpu", 1, 1).expect("CPU surface allocates");
         assert!(
             !graphics
                 .raster(cpu)
@@ -993,7 +985,18 @@ mod metal_tests {
                 .surface
                 .image_snapshot()
                 .is_texture_backed(),
-            "ending terminal graphics returns subsequent exports to CPU"
+            "CPU selection must remain independent of existing Metal canvases"
+        );
+        graphics
+            .clear(cpu, [255, 0, 0, 255])
+            .expect("CPU canvas clears");
+        let mut after_cpu = [0; 4];
+        graphics
+            .read_rgba(gpu, 1, 1, &mut after_cpu)
+            .expect("Metal canvas remains readable");
+        assert_eq!(
+            after_cpu, rgba,
+            "CPU drawing must not change a Metal canvas"
         );
     }
 }

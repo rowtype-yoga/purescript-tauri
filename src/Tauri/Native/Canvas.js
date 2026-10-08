@@ -4,7 +4,7 @@ const host = () => {
   return native;
 };
 
-export const create = size => () => host().call("canvasCreate", size);
+export const createImpl = backend => size => () => host().call("canvasCreate", backend, size);
 export const release = target => () => { host().call("canvasRelease", target); };
 export const reset = target => () => { host().call("canvasReset", target); };
 export const clear = target => color => () => { host().call("canvasClear", target, color); };
