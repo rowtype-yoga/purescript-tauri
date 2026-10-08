@@ -4,7 +4,9 @@
 //! avoids serializing drawing calls and lets path values stay in the JavaScript
 //! array until Skia consumes each numeric element.
 
-use super::{absolute_path, failure, write_output, Config, Host, HostResult, INTERRUPT, RUN_LOCK};
+use super::{
+    absolute_path, failure, write_output, Config, Host, HostResult, Terminal, INTERRUPT, RUN_LOCK,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
@@ -832,6 +834,10 @@ fn dispatch(
             api.set(value, "byteLength", api.number(byte_length))?;
             Ok(value.cast_const())
         }
+        "sharedFrameConsumed" => api
+            .native(host.shared_frame_consumed(api.u32(args, 0)?))
+            .map(|value| api.bool(value)),
+
         "sharedFrameRelease" => result!(host.release_shared_frame(api.u32(args, 0)?)),
         "sharedFrameClose" => result!(host.close_shared_frames()),
         "beginVideo" => {
@@ -856,6 +862,15 @@ fn dispatch(
                 (0, 0)
             };
             let value = api.object_output();
+            api.set(value, "width", api.number(width))?;
+            api.set(value, "height", api.number(height))?;
+            Ok(value.cast_const())
+        }
+        "terminalGraphicsInspectSize" => {
+            let (columns, rows, width, height) = api.native(Terminal::inspect_size())?;
+            let value = api.object_output();
+            api.set(value, "columns", api.number(columns))?;
+            api.set(value, "rows", api.number(rows))?;
             api.set(value, "width", api.number(width))?;
             api.set(value, "height", api.number(height))?;
             Ok(value.cast_const())

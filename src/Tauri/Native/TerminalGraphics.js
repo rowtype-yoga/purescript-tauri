@@ -4,6 +4,7 @@ const host = () => {
   return native;
 };
 
+export const inspectSize = () => host().call("terminalGraphicsInspectSize");
 export const open = () => { host().call("terminalGraphicsOpen"); };
 export const size = () => host().call("terminalGraphicsSize");
 export const present = surface => position => () => {

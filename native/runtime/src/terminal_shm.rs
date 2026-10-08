@@ -99,6 +99,24 @@ impl SharedFrame {
         &self.name[..28]
     }
 
+    /// Returns true only after another process has unlinked this frame's POSIX
+    /// name. The mapping remains owned and usable until this frame is dropped.
+    pub(crate) fn consumed(&self) -> io::Result<bool> {
+        let fd = unsafe { libc::shm_open(self.name.as_ptr().cast(), libc::O_RDONLY, 0) };
+        if fd >= 0 {
+            unsafe {
+                libc::close(fd);
+            }
+            return Ok(false);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            Ok(true)
+        } else {
+            Err(error)
+        }
+    }
+
     pub(crate) fn bytes_mut(&mut self) -> &mut [u8] {
         // The mapping is exclusively owned by this frame. A consumer receives
         // its name only after rendering has written every byte.
@@ -163,6 +181,8 @@ mod tests {
             unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );
+        assert!(!frame.consumed().unwrap());
+
         unsafe { libc::close(fd) };
         drop(frame);
         assert_eq!(
@@ -176,11 +196,52 @@ mod tests {
     }
 
     #[test]
-    fn terminal_unlink_keeps_sender_mapping_alive_until_drop() {
+    fn terminal_unlink_marks_frame_consumed_without_releasing_mapping() {
         let mut frame = SharedFrame::create(4).unwrap();
         frame.bytes_mut().copy_from_slice(&[21, 42, 63, 127]);
         assert_eq!(unsafe { libc::shm_unlink(frame.name.as_ptr().cast()) }, 0);
+        assert!(frame.consumed().unwrap());
         assert_eq!(frame.bytes_mut(), &[21, 42, 63, 127]);
         drop(frame);
+    }
+
+    #[test]
+    fn consumed_propagates_non_missing_shared_memory_errors() {
+        const CHILD: &str = "TAURI_TEST_SHARED_FRAME_FD_LIMIT";
+        if std::env::var_os(CHILD).is_some() {
+            let frame = SharedFrame::create(4).unwrap();
+            let mut previous = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, previous.as_mut_ptr()) },
+                0
+            );
+            let previous = unsafe { previous.assume_init() };
+            let exhausted = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: previous.rlim_max,
+            };
+            assert_eq!(
+                unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &exhausted) },
+                0
+            );
+            let result = frame.consumed();
+            assert_eq!(
+                unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &previous) },
+                0
+            );
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EMFILE));
+            assert!(!frame.consumed().unwrap());
+            return;
+        }
+        // Descriptor exhaustion must not perturb other tests running in parallel.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "terminal_shm::tests::consumed_propagates_non_missing_shared_memory_errors",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }

@@ -1,7 +1,8 @@
 -- | Kitty graphics terminal session backed by tauri-native-host.
 -- | Call `close` exactly once after `open`, including exceptional exits.
 module Tauri.Native.TerminalGraphics
-  ( open
+  ( inspectSize
+  , open
   , size
   , present
   , readKey
@@ -12,6 +13,11 @@ import Prelude (Unit)
 
 import Effect (Effect)
 import Tauri.Native.Canvas (Surface)
+
+-- | Read the controlling terminal's ioctl dimensions without reading input,
+-- | changing terminal mode, or writing terminal escapes. Returns zeros when no
+-- | controlling terminal exists; reported nonzero values are never inferred.
+foreign import inspectSize :: Effect { columns :: Int, rows :: Int, width :: Int, height :: Int }
 
 -- | Require a usable TTY, verify Kitty graphics support, then acquire a
 -- | fullscreen terminal session and verify Metal availability on macOS.

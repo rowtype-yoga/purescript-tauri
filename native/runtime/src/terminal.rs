@@ -259,6 +259,16 @@ impl Terminal {
         }
     }
 
+    /// Inspect the controlling terminal's cell and pixel dimensions without
+    /// reading terminal input, changing terminal state, or writing escapes.
+    /// Missing controlling terminals report zeros; ioctl failures propagate.
+    pub fn inspect_size() -> HostResult<(u16, u16, u16, u16)> {
+        #[cfg(not(unix))]
+        return Ok((0, 0, 0, 0));
+        #[cfg(unix)]
+        controlling_window_size()
+    }
+
     pub fn graphics_size(&mut self) -> HostResult<(u16, u16, u16, u16)> {
         #[cfg(not(unix))]
         return Err(failure("terminal graphics is supported only on Unix"));
@@ -713,6 +723,41 @@ fn window_size() -> HostResult<(u16, u16, u16, u16)> {
     }
     let size = unsafe { size.assume_init() };
     Ok((size.ws_col, size.ws_row, size.ws_xpixel, size.ws_ypixel))
+}
+
+#[cfg(unix)]
+fn controlling_window_size() -> HostResult<(u16, u16, u16, u16)> {
+    let fd = unsafe {
+        libc::open(
+            b"/dev/tty\0".as_ptr().cast(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ENXIO) {
+            Ok((0, 0, 0, 0))
+        } else {
+            Err(error.into())
+        };
+    }
+    let mut size = std::mem::MaybeUninit::<libc::winsize>::zeroed();
+    let result = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, size.as_mut_ptr()) };
+    let ioctl_error = if result < 0 {
+        Some(io::Error::last_os_error())
+    } else {
+        None
+    };
+    unsafe {
+        libc::close(fd);
+    }
+    match ioctl_error {
+        Some(error) => Err(error.into()),
+        None => {
+            let size = unsafe { size.assume_init() };
+            Ok((size.ws_col, size.ws_row, size.ws_xpixel, size.ws_ypixel))
+        }
+    }
 }
 
 #[cfg(unix)]

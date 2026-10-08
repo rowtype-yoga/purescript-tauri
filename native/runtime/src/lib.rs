@@ -175,6 +175,20 @@ impl Host {
         Err(failure("shared-memory frames are supported only on Unix"))
     }
 
+    #[cfg(unix)]
+    fn shared_frame_consumed(&self, id: u32) -> HostResult<bool> {
+        let frame = self
+            .frames
+            .get(&id)
+            .ok_or_else(|| failure("shared-memory frame is not open"))?;
+        Ok(frame.frame.consumed()?)
+    }
+
+    #[cfg(not(unix))]
+    fn shared_frame_consumed(&self, _id: u32) -> HostResult<bool> {
+        Err(failure("shared-memory frames are supported only on Unix"))
+    }
+
     fn release_shared_frame(&mut self, id: u32) -> HostResult<()> {
         #[cfg(unix)]
         self.frames.remove(&id);
@@ -682,6 +696,8 @@ fn dispatch<'js>(
             value.set("byteLength", byte_length)?;
             value.into_js(ctx)
         }
+        "sharedFrameConsumed" => result!(host.shared_frame_consumed(arg!(0, u32))),
+
         "sharedFrameRelease" => result!(host.release_shared_frame(arg!(0, u32))),
         "sharedFrameClose" => result!(host.close_shared_frames()),
         "beginVideo" => {
@@ -705,6 +721,15 @@ fn dispatch<'js>(
                 (0, 0)
             };
             let value = Object::new(ctx.clone())?;
+            value.set("width", width)?;
+            value.set("height", height)?;
+            value.into_js(ctx)
+        }
+        "terminalGraphicsInspectSize" => {
+            let (columns, rows, width, height) = native(ctx, Terminal::inspect_size())?;
+            let value = Object::new(ctx.clone())?;
+            value.set("columns", columns)?;
+            value.set("rows", rows)?;
             value.set("width", width)?;
             value.set("height", height)?;
             value.into_js(ctx)

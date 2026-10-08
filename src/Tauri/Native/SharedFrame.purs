@@ -4,6 +4,7 @@ module Tauri.Native.SharedFrame
   , open
   , capture
   , info
+  , consumed
   , release
   , close
   ) where
@@ -23,10 +24,15 @@ foreign import open :: Effect Unit
 foreign import capture :: Surface -> Effect Frame
 
 -- | Metadata for an open frame. `name` is the POSIX name, including its leading
--- | slash, and `byteLength` is the RGBA mapping length.
+-- | slash. `byteLength` is the tight RGBA length, excluding any POSIX page padding.
 foreign import info
   :: Frame
   -> { id :: Int, name :: String, width :: Int, height :: Int, byteLength :: Int }
+
+-- | Whether the terminal has unlinked this frame's POSIX name. This checks only
+-- | the named object: it neither copies pixels nor releases the owned mapping.
+-- | Non-missing shared-memory errors are raised.
+foreign import consumed :: Frame -> Effect Boolean
 
 -- | Release this frame's mapping. Releasing an already released frame is safe.
 foreign import release :: Frame -> Effect Unit
